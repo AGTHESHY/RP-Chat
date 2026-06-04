@@ -71,6 +71,11 @@ const newSchemeName = ref('')
 const addVarDialogVisible = ref(false)
 const newVarForm = ref({ key: '', label: '', body: '' })
 
+const selectedVarIds = ref<string[]>([])
+const deleteVarDialogVisible = ref(false)
+const deleteVarDialogMode = ref<'single' | 'batch'>('single')
+const deleteVarTarget = ref<JailbreakVariableModule | null>(null)
+
 const userContent = ref('')
 const running = ref(false)
 const lastResponse = ref<ChatCompletionResponse | null>(null)
@@ -103,8 +108,11 @@ watch(
   () => syncTargetModelFromRuntime(),
 )
 
-watch(contentMode, (mode) => {
+watch(contentMode, (mode, prev) => {
   onContentModeChange(mode)
+  if (mode === 'plain' && prev === 'variable' && hasStructuredModules.value) {
+    form.value.content = exportCleanJailbreakSp(modulesDoc.value)
+  }
 })
 
 async function loadList() {
@@ -137,16 +145,64 @@ const filteredVariables = computed(() => {
   return list.filter((v) => v.group === varGroupFilter.value)
 })
 
-/** 纯文本与测试/导出：有模块时始终为去掉 ST 语法的合成正文 */
+const selectedVarCount = computed(() => selectedVarIds.value.length)
+
+const isAllFilteredSelected = computed(() => {
+  const list = filteredVariables.value
+  return list.length > 0 && list.every((v) => selectedVarIds.value.includes(v.id))
+})
+
+const isFilteredSelectionIndeterminate = computed(() => {
+  const list = filteredVariables.value
+  const n = list.filter((v) => selectedVarIds.value.includes(v.id)).length
+  return n > 0 && n < list.length
+})
+
+const deleteVarDialogMessage = computed(() => {
+  if (deleteVarDialogMode.value === 'single' && deleteVarTarget.value) {
+    return `确定删除开关「${deleteVarTarget.value.label}」（${deleteVarTarget.value.key}）？`
+  }
+  const labels = modulesDoc.value.variables
+    .filter((v) => selectedVarIds.value.includes(v.id))
+    .map((v) => v.label)
+    .slice(0, 5)
+  const more = selectedVarCount.value - labels.length
+  const preview = labels.join('、')
+  const suffix = more > 0 ? ` 等共 ${selectedVarCount.value} 项` : ''
+  return `确定批量删除 ${selectedVarCount.value} 个开关？${preview ? `\n${preview}${suffix}` : ''}`
+})
+
+function clearVarSelection() {
+  selectedVarIds.value = []
+}
+
+function toggleVarSelected(id: string, checked: boolean | string | number) {
+  const on = checked === true
+  const set = new Set(selectedVarIds.value)
+  if (on) set.add(id)
+  else set.delete(id)
+  selectedVarIds.value = [...set]
+}
+
+function toggleSelectAllFiltered(checked: boolean | string | number) {
+  const on = checked === true
+  const set = new Set(selectedVarIds.value)
+  for (const v of filteredVariables.value) {
+    if (on) set.add(v.id)
+    else set.delete(v.id)
+  }
+  selectedVarIds.value = [...set]
+}
+
+/** 测试/导出：纯文本模式用编辑区正文；变量模式用合成干净 SP */
 const effectiveSystemPrompt = computed(() => {
+  if (contentMode.value === 'plain') return form.value.content
   if (hasStructuredModules.value) return exportCleanJailbreakSp(modulesDoc.value)
   return form.value.content
 })
 
-const plainDisplayContent = computed(() => effectiveSystemPrompt.value)
-
 function syncPlainFromModules() {
-  if (!hasStructuredModules.value) return
+  if (!hasStructuredModules.value || contentMode.value === 'plain') return
   form.value.content = exportCleanJailbreakSp(modulesDoc.value)
 }
 
@@ -171,6 +227,7 @@ function cloneModulesDoc(doc: JailbreakModulesDoc): JailbreakModulesDoc {
 }
 
 function selectRecord(row: JailbreakRecord) {
+  clearVarSelection()
   selectedId.value = row.id
   contentMode.value = row.content_mode || 'plain'
   if (row.modules_json) {
@@ -178,9 +235,11 @@ function selectRecord(row: JailbreakRecord) {
   } else {
     modulesDoc.value = createEmptyModulesDoc()
   }
-  const cleanContent = row.modules_json
-    ? exportCleanJailbreakSp(modulesDoc.value)
-    : row.content
+  const mode = row.content_mode || 'plain'
+  const cleanContent =
+    mode === 'variable' && row.modules_json
+      ? exportCleanJailbreakSp(modulesDoc.value)
+      : row.content
   form.value = {
     scheme_name: row.scheme_name,
     version: row.version,
@@ -206,22 +265,23 @@ function onRowClick(row: JailbreakRecord) {
 }
 
 function buildSavePayload() {
-  if (contentMode.value === 'variable' || hasStructuredModules.value) {
-    const clean = exportCleanJailbreakSp(modulesDoc.value)
+  if (contentMode.value === 'plain') {
     return {
       target_model: form.value.target_model,
-      content: clean,
+      content: form.value.content,
       changelog: form.value.changelog,
-      content_mode: 'variable' as const,
-      modules_json: cloneModulesDoc(modulesDoc.value),
+      content_mode: 'plain' as const,
+      /** 纯文本保存以编辑区为准，不保留变量结构，避免保存后从 modules 还原正文 */
+      modules_json: null,
     }
   }
+  const clean = exportCleanJailbreakSp(modulesDoc.value)
   return {
     target_model: form.value.target_model,
-    content: form.value.content,
+    content: clean,
     changelog: form.value.changelog,
-    content_mode: 'plain' as const,
-    modules_json: null,
+    content_mode: 'variable' as const,
+    modules_json: cloneModulesDoc(modulesDoc.value),
   }
 }
 
@@ -233,7 +293,12 @@ async function saveRecord() {
     const updated = await updateJailbreak(selectedId.value, buildSavePayload())
     const idx = records.value.findIndex((r) => r.id === updated.id)
     if (idx >= 0) records.value[idx] = updated
-    if (selectedId.value === updated.id) selectRecord(updated)
+    if (selectedId.value === updated.id) {
+      if (contentMode.value === 'plain') {
+        modulesDoc.value = createEmptyModulesDoc()
+      }
+      selectRecord(updated)
+    }
     ElMessage.success('已保存')
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '保存失败')
@@ -315,10 +380,11 @@ async function onPresetFileChange(event: Event) {
     const text = await file.text()
     const data = JSON.parse(text) as Parameters<typeof parseShuangrenPreset>[0]
     modulesDoc.value = parseShuangrenPreset(data)
+    clearVarSelection()
     syncPlainFromModules()
-    contentMode.value = 'plain'
+    contentMode.value = 'variable'
     const n = modulesDoc.value.variables.length
-    ElMessage.success(`已导入 ${n} 个开关，纯文本已同步为合成后的干净 SP`)
+    ElMessage.success(`已导入 ${n} 个开关，可在「变量开关」中编辑`)
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '预设 JSON 解析失败')
   } finally {
@@ -372,14 +438,35 @@ function confirmAddVariable() {
   syncPlainFromModules()
 }
 
-async function removeVariable(mod: JailbreakVariableModule) {
-  try {
-    await ElMessageBox.confirm(`删除开关「${mod.label}」？`, '删除', { type: 'warning' })
-    modulesDoc.value.variables = modulesDoc.value.variables.filter((v) => v.id !== mod.id)
-    syncPlainFromModules()
-  } catch {
-    /* cancelled */
+function openRemoveVariableDialog(mod: JailbreakVariableModule) {
+  deleteVarDialogMode.value = 'single'
+  deleteVarTarget.value = mod
+  deleteVarDialogVisible.value = true
+}
+
+function openBatchRemoveDialog() {
+  if (selectedVarCount.value === 0) {
+    ElMessage.warning('请先勾选要删除的开关')
+    return
   }
+  deleteVarDialogMode.value = 'batch'
+  deleteVarTarget.value = null
+  deleteVarDialogVisible.value = true
+}
+
+function confirmRemoveVariables() {
+  const removeIds =
+    deleteVarDialogMode.value === 'single' && deleteVarTarget.value
+      ? new Set([deleteVarTarget.value.id])
+      : new Set(selectedVarIds.value)
+  modulesDoc.value.variables = modulesDoc.value.variables.filter((v) => !removeIds.has(v.id))
+  clearVarSelection()
+  deleteVarDialogVisible.value = false
+  deleteVarTarget.value = null
+  syncPlainFromModules()
+  ElMessage.success(
+    deleteVarDialogMode.value === 'single' ? '已删除开关' : `已删除 ${removeIds.size} 个开关`,
+  )
 }
 
 function onContentModeChange(mode: JailbreakContentMode) {
@@ -552,28 +639,40 @@ onMounted(async () => {
 
             <div v-if="contentMode === 'plain'" class="content-block">
               <el-input
-                v-if="hasStructuredModules"
-                :model-value="plainDisplayContent"
-                type="textarea"
-                class="content-editor"
-                readonly
-                placeholder="破限 System Prompt 正文"
-              />
-              <el-input
-                v-else
                 v-model="form.content"
                 type="textarea"
                 class="content-editor"
-                placeholder="破限 System Prompt 正文"
+                placeholder="直接编写破限 System Prompt 正文，无需导入预设"
               />
               <p v-if="hasStructuredModules" class="plain-hint">
-                由变量开关合成；调整模块请切换到「变量开关」
+                保存后将仅保留此处纯文本（会清除已导入的变量开关结构）。需保留变量请用「变量开关」模式保存
               </p>
             </div>
 
             <div v-else class="variable-edit-area">
               <div class="var-list-header">
-                <span>变量开关（{{ modulesDoc.variables.length }}）</span>
+                <div class="var-list-header-left">
+                  <el-checkbox
+                    :model-value="isAllFilteredSelected"
+                    :indeterminate="isFilteredSelectionIndeterminate"
+                    @change="toggleSelectAllFiltered"
+                  >
+                    全选
+                  </el-checkbox>
+                  <span class="var-list-title">
+                    变量开关（{{ modulesDoc.variables.length }}）
+                    <template v-if="selectedVarCount > 0">· 已选 {{ selectedVarCount }}</template>
+                  </span>
+                  <el-button
+                    size="small"
+                    type="danger"
+                    plain
+                    :disabled="selectedVarCount === 0"
+                    @click="openBatchRemoveDialog"
+                  >
+                    批量删除
+                  </el-button>
+                </div>
                 <el-radio-group v-model="varGroupFilter" size="small">
                   <el-radio-button value="all">全部</el-radio-button>
                   <el-radio-button value="nsfw">NSFW</el-radio-button>
@@ -584,6 +683,10 @@ onMounted(async () => {
               <el-scrollbar class="var-list-scroll">
                 <div v-for="mod in filteredVariables" :key="mod.id" class="var-row">
                   <div class="var-row-head">
+                    <el-checkbox
+                      :model-value="selectedVarIds.includes(mod.id)"
+                      @change="(val) => toggleVarSelected(mod.id, val)"
+                    />
                     <el-switch v-model="mod.enabled" @change="syncPlainFromModules" />
                     <span class="var-label">{{ mod.label }}</span>
                     <el-tag size="small" type="info">{{ mod.key }}</el-tag>
@@ -594,7 +697,7 @@ onMounted(async () => {
                       <el-button size="small" link @click="reorderVariable(modulesDoc, mod.id, 1)">
                         下
                       </el-button>
-                      <el-button size="small" link type="danger" @click="removeVariable(mod)">
+                      <el-button size="small" link type="danger" @click="openRemoveVariableDialog(mod)">
                         删
                       </el-button>
                     </div>
@@ -687,6 +790,21 @@ onMounted(async () => {
       </template>
     </el-dialog>
 
+    <el-dialog
+      v-model="deleteVarDialogVisible"
+      :title="deleteVarDialogMode === 'single' ? '删除开关' : '批量删除开关'"
+      width="440px"
+      align-center
+      append-to-body
+      destroy-on-close
+    >
+      <p class="delete-var-dialog-msg">{{ deleteVarDialogMessage }}</p>
+      <template #footer>
+        <el-button @click="deleteVarDialogVisible = false">取消</el-button>
+        <el-button type="danger" @click="confirmRemoveVariables">确定删除</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="addVarDialogVisible" title="添加变量开关" width="480px">
       <el-form label-width="80px">
         <el-form-item label="key" required>
@@ -738,8 +856,30 @@ onMounted(async () => {
   justify-content: space-between;
   gap: 8px;
   flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.var-list-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.var-list-title {
   font-size: 13px;
   font-weight: 600;
+  white-space: nowrap;
+}
+
+.delete-var-dialog-msg {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: #606266;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .var-list-scroll {
