@@ -34,8 +34,23 @@ const jsonExpanded = ref<string[]>([])
 const rpHistoryList = ref<RpHistorySummary[]>([])
 const selectedHistoryKey = ref<string | null>(null)
 const rpHistoryDetail = ref<RpHistoryDetail | null>(null)
+const selectedHistoryModel = ref('')
 const historyLoading = ref(false)
 const historyDetailLoading = ref(false)
+
+const historyModelDetail = computed(() => {
+  const base = rpHistoryDetail.value
+  if (!base || !selectedHistoryModel.value) return null
+  const run = base.model_runs.find((item) => item.model === selectedHistoryModel.value)
+  if (!run) return null
+  return {
+    ...base,
+    compress: run.compress,
+    merge: run.merge,
+    compress_run: run.compress_run,
+    merge_run: run.merge_run,
+  }
+})
 
 const chatTurns = computed(() =>
   (selectedConversation.value?.messages ?? []).map((msg) => ({
@@ -107,7 +122,7 @@ async function loadRpHistory() {
     }
     const currentKey = selectedHistoryKey.value
     const stillExists =
-      currentKey && rpHistoryList.value.some((r) => r.conversation_key === currentKey)
+      currentKey && rpHistoryList.value.some((r) => r.history_key === currentKey)
     if (!stillExists) {
       void selectRpHistory(rpHistoryList.value[0])
     }
@@ -119,7 +134,7 @@ async function loadRpHistory() {
 }
 
 async function selectRpHistory(row: RpHistorySummary) {
-  selectedHistoryKey.value = row.conversation_key
+  selectedHistoryKey.value = row.history_key
   rpHistoryDetail.value = null
   historyDetailLoading.value = true
   try {
@@ -127,9 +142,12 @@ async function selectRpHistory(row: RpHistorySummary) {
       user_id: row.user_id,
       role_id: row.role_id,
       app_name: row.app_name,
+      run_group_id: row.run_group_id,
     })
+    selectedHistoryModel.value = rpHistoryDetail.value.model_runs[0]?.model ?? ''
   } catch (error) {
     rpHistoryDetail.value = null
+    selectedHistoryModel.value = ''
     ElMessage.error(error instanceof Error ? error.message : '加载历史 RP 详情失败')
   } finally {
     historyDetailLoading.value = false
@@ -245,19 +263,21 @@ onMounted(async () => {
             highlight-current-row
             class="record-table"
             size="small"
-            row-key="conversation_key"
+            row-key="history_key"
             @row-click="onHistoryRowClick"
           >
             <el-table-column prop="role_name" label="昵称" min-width="80" show-overflow-tooltip />
             <el-table-column prop="user_id" label="用户 id" min-width="72" show-overflow-tooltip />
-            <el-table-column label="Compress" width="72" align="center">
+            <el-table-column prop="prompt_version" label="SP" width="44" show-overflow-tooltip />
+            <el-table-column label="模型" width="44" align="center" prop="model_count" />
+            <el-table-column label="压缩" width="56" align="center">
               <template #default="{ row }">
                 <el-tag :type="row.has_compress ? 'success' : 'info'" size="small">
                   {{ row.has_compress ? '有' : '无' }}
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="Merge" width="64" align="center">
+            <el-table-column label="合并" width="56" align="center">
               <template #default="{ row }">
                 <el-tag :type="row.has_merge ? 'success' : 'info'" size="small">
                   {{ row.has_merge ? '有' : '无' }}
@@ -320,32 +340,43 @@ onMounted(async () => {
                 <el-tag size="small" type="warning">
                   第 {{ rpHistoryDetail.round_start }}-{{ rpHistoryDetail.round_end }} 轮
                 </el-tag>
+                <el-tag size="small">SP: {{ rpHistoryDetail.prompt_version }}</el-tag>
               </div>
+              <el-form-item v-if="rpHistoryDetail.model_runs.length > 0" label="模型" class="history-model-select">
+                <el-select v-model="selectedHistoryModel" style="width: 100%">
+                  <el-option
+                    v-for="run in rpHistoryDetail.model_runs"
+                    :key="run.model"
+                    :label="run.model"
+                    :value="run.model"
+                  />
+                </el-select>
+              </el-form-item>
               <p class="history-hint">
                 Compress 为结构化输出（<code>history_segment</code> + <code>memory_state</code>）；Merge 仅
                 <code>history_memory</code>，首轮合并时叙事常与 segment 相近，属正常现象。
               </p>
-              <div class="history-panels">
+              <div v-if="historyModelDetail" class="history-panels">
                 <div class="json-panel">
                   <div class="json-panel-title">Compress</div>
-                  <p class="run-meta">{{ formatRunMeta(rpHistoryDetail.compress_run) }}</p>
+                  <p class="run-meta">{{ formatRunMeta(historyModelDetail.compress_run) }}</p>
                   <el-scrollbar class="json-panel-scroll">
                     <JsonVisualViewer
-                      v-if="rpHistoryDetail.compress"
-                      :key="`${selectedHistoryKey}-compress`"
-                      :data="rpHistoryDetail.compress"
+                      v-if="historyModelDetail.compress"
+                      :key="`${selectedHistoryKey}-${selectedHistoryModel}-compress`"
+                      :data="historyModelDetail.compress"
                     />
                     <el-empty v-else description="暂无 Compress 结果" :image-size="64" />
                   </el-scrollbar>
                 </div>
                 <div class="json-panel">
                   <div class="json-panel-title">Merge</div>
-                  <p class="run-meta">{{ formatRunMeta(rpHistoryDetail.merge_run) }}</p>
+                  <p class="run-meta">{{ formatRunMeta(historyModelDetail.merge_run) }}</p>
                   <el-scrollbar class="json-panel-scroll">
                     <JsonVisualViewer
-                      v-if="rpHistoryDetail.merge"
-                      :key="`${selectedHistoryKey}-merge`"
-                      :data="rpHistoryDetail.merge"
+                      v-if="historyModelDetail.merge"
+                      :key="`${selectedHistoryKey}-${selectedHistoryModel}-merge`"
+                      :data="historyModelDetail.merge"
                     />
                     <el-empty v-else description="暂无 Merge 结果" :image-size="64" />
                   </el-scrollbar>

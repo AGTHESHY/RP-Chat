@@ -1,13 +1,19 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { formatApiDisplayUrl } from '../composables/useApiProfileRegistry'
 import { usePageRuntime } from '../composables/usePageRuntime'
 import type { RuntimeScope } from '../utils/apiProfileStorage'
 
-const props = defineProps<{
-  scope: RuntimeScope
-}>()
+const props = withDefaults(
+  defineProps<{
+    scope: RuntimeScope
+    multiSelect?: boolean
+  }>(),
+  {
+    multiSelect: false,
+  },
+)
 
 const router = useRouter()
 const {
@@ -15,11 +21,16 @@ const {
   registry,
   currentProfile,
   availableModels,
+  selectedModelNames,
   hasValidRuntime,
   switchProfile,
   switchModel,
+  toggleModelSelection,
+  setSelectedModels,
   syncWithRegistry,
 } = usePageRuntime(props.scope)
+
+const modelPopoverVisible = ref(false)
 
 onMounted(() => {
   syncWithRegistry()
@@ -34,7 +45,23 @@ const apiDisplayHost = computed(() =>
   currentProfile.value ? formatApiDisplayUrl(currentProfile.value.base_url) : '',
 )
 
-const modelDisplay = computed(() => runtime.value.modelName || '未选择')
+const modelDisplay = computed(() => {
+  if (props.multiSelect) {
+    const names = selectedModelNames.value
+    if (names.length === 0) return '未选择'
+    if (names.length === 1) return names[0]
+    return `已选择 ${names.length} 个模型`
+  }
+  return runtime.value.modelName || '未选择'
+})
+
+function isModelChecked(model: string) {
+  return selectedModelNames.value.includes(model)
+}
+
+function onModelCheckChange(model: string, checked: boolean) {
+  toggleModelSelection(model, checked)
+}
 </script>
 
 <template>
@@ -60,7 +87,46 @@ const modelDisplay = computed(() => runtime.value.modelName || '未选择')
         </template>
       </el-dropdown>
 
-      <el-dropdown trigger="click" @command="switchModel">
+      <el-popover
+        v-if="multiSelect"
+        v-model:visible="modelPopoverVisible"
+        placement="bottom-end"
+        :width="280"
+        trigger="click"
+      >
+        <template #reference>
+          <span class="api-meta-chip api-meta-chip--model api-meta-chip--clickable">
+            <span class="api-meta-label">模型</span>
+            <span class="api-meta-value">{{ modelDisplay }}</span>
+          </span>
+        </template>
+        <div class="model-multi-panel">
+          <div class="model-multi-title">多选模型（将并行请求）</div>
+          <div class="model-multi-list">
+            <el-checkbox
+              v-for="model in availableModels"
+              :key="model"
+              :model-value="isModelChecked(model)"
+              @change="(val: boolean) => onModelCheckChange(model, val)"
+            >
+              {{ model }}
+            </el-checkbox>
+          </div>
+          <div class="model-multi-actions">
+            <el-button
+              size="small"
+              link
+              type="primary"
+              @click="setSelectedModels(availableModels)"
+            >
+              全选
+            </el-button>
+            <el-button size="small" link @click="setSelectedModels([])">清空</el-button>
+          </div>
+        </div>
+      </el-popover>
+
+      <el-dropdown v-else trigger="click" @command="switchModel">
         <span class="api-meta-chip api-meta-chip--model api-meta-chip--clickable">
           <span class="api-meta-label">模型</span>
           <span class="api-meta-value">{{ modelDisplay }}</span>
@@ -105,7 +171,7 @@ const modelDisplay = computed(() => runtime.value.modelName || '未选择')
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  max-width: 240px;
+  max-width: 200px;
   padding: 2px 8px;
   border-radius: 4px;
   font-size: 12px;
@@ -158,6 +224,34 @@ const modelDisplay = computed(() => runtime.value.modelName || '未选择')
 .api-link {
   font-size: 12px;
   white-space: nowrap;
+}
+
+.model-multi-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.model-multi-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.model-multi-list {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.model-multi-actions {
+  display: flex;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px solid #ebeef5;
 }
 
 :deep(.el-dropdown-menu__item.is-active) {

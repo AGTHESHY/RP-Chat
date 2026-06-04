@@ -7,7 +7,7 @@ import {
   type VersionsListResponse,
 } from '../api'
 import type { RpEvalParsed } from './parseRpEvalJson'
-import { parseRpEvalJson } from './parseRpEvalJson'
+import { isMultiCompareEval, parseRpEvalJson } from './parseRpEvalJson'
 
 const PROMPT_EXCERPT_MAX = 12_000
 const DOC_EXCERPT_MAX = 2000
@@ -33,6 +33,23 @@ function summarizeEvalForBrain(evalResult: Record<string, unknown>) {
     }
   }
   const d = parsed.data
+  if (isMultiCompareEval(d)) {
+    return {
+      parse_ok: true,
+      eval_mode: 'multi_compare' as const,
+      overall_score: d.overall_score,
+      overall_confidence: d.overall_confidence,
+      summary: d.summary,
+      recommendations: d.recommendations,
+      model_scores: d.model_scores.map((m) => ({
+        model: m.model,
+        overall_score: m.overall_score,
+        overall_confidence: m.overall_confidence,
+        summary: m.summary,
+      })),
+      cross_model_comparison: d.cross_model_comparison,
+    }
+  }
   const weakDimensions = (mod: RpEvalParsed['segment_compress'], label: string) => {
     if (!mod.available) return []
     return mod.dimensions

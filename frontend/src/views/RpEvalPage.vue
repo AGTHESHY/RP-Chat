@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   getChatQaConversation,
@@ -12,6 +12,7 @@ import {
   saveRpEval,
   type RpEvalSummary,
   type RpHistoryDetail,
+  type RpHistoryModelRun,
   type RpHistorySummary,
 } from '../api'
 import ApiRuntimePicker from '../components/ApiRuntimePicker.vue'
@@ -21,10 +22,21 @@ import AppPanel from '../components/layout/AppPanel.vue'
 import FilterBar from '../components/layout/FilterBar.vue'
 import RuntimeParamsFields from '../components/RuntimeParamsFields.vue'
 import { formatConfidence, formatHistoryTime } from '../utils/format'
-import { formatEvalPromptVersions } from '../utils/rpEvalFormat'
+import {
+  formatEvalPromptVersions,
+  formatEvaluatedModels,
+  formatRpHistoryModelCount,
+} from '../utils/rpEvalFormat'
 import { usePageRuntime } from '../composables/usePageRuntime'
-import { buildRpEvalUserContent } from '../utils/rpEvalPayload'
-import { parseRpEvalJson, type RpEvalParsed } from '../utils/parseRpEvalJson'
+import {
+  buildRpEvalUserContent,
+  pickEvaluableModelRuns,
+} from '../utils/rpEvalPayload'
+import {
+  formatEvaluatedModelsLabel,
+  parseRpEvalJson,
+  type RpEvalParsed,
+} from '../utils/parseRpEvalJson'
 import {
   loadRpEvalSystemPrompt,
   resetRpEvalSystemPrompt,
@@ -40,6 +52,11 @@ const filterRoleName = ref('')
 const selectedRpHistoryKey = ref('')
 const rpHistoryDetail = ref<RpHistoryDetail | null>(null)
 
+const historyTab = ref<'rp-test' | 'eval'>('rp-test')
+/** 勾选参与横向对比测评的被测模型 */
+const checkedEvalModels = ref<string[]>([])
+const detailLoading = ref(false)
+
 const evalSystemPrompt = ref(loadRpEvalSystemPrompt())
 const evaluating = ref(false)
 const evalHistory = ref<RpEvalSummary[]>([])
@@ -50,18 +67,100 @@ const currentParsed = ref<RpEvalParsed | null>(null)
 
 const selectedRpHistorySummary = computed(
   () =>
-    rpHistoryList.value.find((item) => item.conversation_key === selectedRpHistoryKey.value) ??
+    rpHistoryList.value.find((item) => item.history_key === selectedRpHistoryKey.value) ??
     null,
 )
 
-const canRunEval = computed(() => {
-  if (!selectedRpHistoryKey.value || !rpHistoryDetail.value) return false
-  const d = rpHistoryDetail.value
-  return Boolean(d.compress || d.merge) && Boolean(resolvedRequest.value)
+const modelRuns = computed(() => rpHistoryDetail.value?.model_runs ?? [])
+
+const modelTablePaneRef = ref<HTMLElement | null>(null)
+const modelTableMaxHeight = ref<number | undefined>(undefined)
+const modelTableCompact = ref(false)
+let modelTableResizeObserver: ResizeObserver | null = null
+
+function syncModelTableLayout() {
+  const pane = modelTablePaneRef.value
+  if (!pane || historyTab.value !== 'rp-test') {
+    modelTableMaxHeight.value = undefined
+    return
+  }
+
+  modelTableCompact.value = pane.clientWidth < 360
+
+  // 该容器已被 flex 链约束为「可用高度」。直接作为 el-table 的 max-height：
+  // 行少时表格按内容自动收缩（不留白），行多时在表格内部出现滚动条。
+  const available = Math.floor(pane.clientHeight)
+  modelTableMaxHeight.value = available > 60 ? available : undefined
+}
+
+function bindModelTableResizeObserver() {
+  modelTableResizeObserver?.disconnect()
+  const pane = modelTablePaneRef.value
+  if (!pane) return
+  modelTableResizeObserver = new ResizeObserver(() => {
+    void syncModelTableLayout()
+  })
+  modelTableResizeObserver.observe(pane)
+  const tabs = pane.closest('.history-tabs')
+  if (tabs instanceof HTMLElement) {
+    modelTableResizeObserver.observe(tabs)
+  }
+}
+
+watch(
+  [modelRuns, selectedRpHistoryKey, historyTab, detailLoading],
+  async () => {
+    await nextTick()
+    bindModelTableResizeObserver()
+    syncModelTableLayout()
+  },
+)
+
+const selectedModelRuns = computed(() => {
+  const base = rpHistoryDetail.value
+  if (!base || checkedEvalModels.value.length === 0) return []
+  return pickEvaluableModelRuns(base, checkedEvalModels.value)
 })
 
-function rpHistoryFlags(row: RpHistorySummary): string {
-  return [row.has_compress ? 'C' : '', row.has_merge ? 'M' : ''].filter(Boolean).join('') || '—'
+const canRunEval = computed(() => {
+  if (!selectedRpHistoryKey.value || !rpHistoryDetail.value) return false
+  return selectedModelRuns.value.length > 0 && Boolean(resolvedRequest.value)
+})
+
+function isModelRunEvaluable(run: RpHistoryModelRun): boolean {
+  return Boolean(run.compress || run.merge)
+}
+
+function isModelRunChecked(run: RpHistoryModelRun): boolean {
+  return checkedEvalModels.value.includes(run.model)
+}
+
+function modelRunRowClassName({ row }: { row: RpHistoryModelRun }) {
+  return isModelRunChecked(row) ? 'rp-test-row--selected' : ''
+}
+
+function toggleModelCheck(run: RpHistoryModelRun, checked: boolean) {
+  if (!isModelRunEvaluable(run)) return
+  const set = new Set(checkedEvalModels.value)
+  if (checked) {
+    set.add(run.model)
+  } else {
+    set.delete(run.model)
+  }
+  checkedEvalModels.value = [...set]
+}
+
+function syncDefaultCheckedModels() {
+  const runs = rpHistoryDetail.value?.model_runs ?? []
+  const evaluable = runs.filter(isModelRunEvaluable)
+  if (evaluable.length === 0) {
+    checkedEvalModels.value = []
+    return
+  }
+  const kept = checkedEvalModels.value.filter((m) =>
+    evaluable.some((r) => r.model === m),
+  )
+  checkedEvalModels.value = kept.length > 0 ? kept : [evaluable[0].model]
 }
 
 const selectedEvalSummary = computed(
@@ -76,8 +175,10 @@ watch(selectedRpHistoryKey, () => {
   selectedEvalId.value = null
   currentRaw.value = ''
   currentParsed.value = null
-  void syncRpHistorySelection(selectedRpHistoryKey.value)
-  void loadEvalHistory()
+  void (async () => {
+    await syncRpHistorySelection(selectedRpHistoryKey.value)
+    await loadEvalHistory()
+  })()
 })
 
 async function loadRpHistoryList() {
@@ -94,7 +195,7 @@ async function loadRpHistoryList() {
     }
     if (
       !selectedRpHistoryKey.value ||
-      !rpHistoryList.value.some((item) => item.conversation_key === selectedRpHistoryKey.value)
+      !rpHistoryList.value.some((item) => item.history_key === selectedRpHistoryKey.value)
     ) {
       selectRpHistory(rpHistoryList.value[0])
     }
@@ -107,7 +208,7 @@ async function loadRpHistoryList() {
 }
 
 function selectRpHistory(row: RpHistorySummary) {
-  selectedRpHistoryKey.value = row.conversation_key
+  selectedRpHistoryKey.value = row.history_key
 }
 
 function onRpHistoryRowClick(row: { conversation_key?: string }) {
@@ -117,28 +218,42 @@ function onRpHistoryRowClick(row: { conversation_key?: string }) {
 async function syncRpHistorySelection(key: string) {
   if (!key) {
     rpHistoryDetail.value = null
+    checkedEvalModels.value = []
     return
   }
   const summary = selectedRpHistorySummary.value
   if (!summary) return
+
+  detailLoading.value = true
   try {
     rpHistoryDetail.value = await getRpHistoryDetail({
       user_id: summary.user_id,
       role_id: summary.role_id,
       app_name: summary.app_name,
+      run_group_id: summary.run_group_id,
     })
+    syncDefaultCheckedModels()
   } catch (error) {
     rpHistoryDetail.value = null
+    checkedEvalModels.value = []
     ElMessage.error(error instanceof Error ? error.message : '加载 RP 历史详情失败')
+  } finally {
+    detailLoading.value = false
   }
 }
 
+function onModelRunRowClick(row: RpHistoryModelRun) {
+  if (!isModelRunEvaluable(row)) return
+  toggleModelCheck(row, !isModelRunChecked(row))
+  historyTab.value = 'rp-test'
+}
+
 async function loadEvalHistory() {
-  if (!rpHistoryDetail.value) {
+  const detail = rpHistoryDetail.value
+  if (!detail) {
     evalHistory.value = []
     return
   }
-  const detail = rpHistoryDetail.value
   evalHistoryLoading.value = true
   try {
     evalHistory.value = await listRpEvaluations({
@@ -162,9 +277,11 @@ function handleResetPrompt() {
 async function handleRunEval() {
   if (!canRunEval.value) {
     if (!selectedRpHistoryKey.value) {
-      ElMessage.warning('请先在左侧选择 RP 历史')
-    } else if (!rpHistoryDetail.value?.compress && !rpHistoryDetail.value?.merge) {
-      ElMessage.warning('该 RP 历史缺少 Compress/Merge 结果')
+      ElMessage.warning('请先在左侧选择对话')
+    } else if (checkedEvalModels.value.length === 0) {
+      ElMessage.warning('请在「RP测试历史」中勾选至少一个模型')
+    } else if (selectedModelRuns.value.length === 0) {
+      ElMessage.warning('所选模型缺少 Compress/Merge 产出')
     } else {
       ElMessage.warning('请先在 API 配置页填写有效 API')
     }
@@ -172,6 +289,7 @@ async function handleRunEval() {
   }
 
   const detail = rpHistoryDetail.value!
+  const modelRuns = selectedModelRuns.value
   const requestConfig = resolvedRequest.value!
   evaluating.value = true
   currentRaw.value = ''
@@ -187,6 +305,7 @@ async function handleRunEval() {
     const userContent = buildRpEvalUserContent({
       messages: conv.messages,
       detail,
+      modelRuns,
     })
 
     const resp = await runChatCompletion({
@@ -215,6 +334,9 @@ async function handleRunEval() {
     }
     currentParsed.value = parsed.data
 
+    const evaluatedModels = modelRuns.map((r) => r.model)
+    const evalMode = evaluatedModels.length > 1 ? 'multi_compare' : 'single'
+    const firstRun = modelRuns[0]
     const saved = await saveRpEval({
       user_id: detail.user_id,
       role_id: detail.role_id,
@@ -222,16 +344,18 @@ async function handleRunEval() {
       role_name: detail.role_name,
       round_start: detail.round_start,
       round_end: detail.round_end,
-      has_compress: Boolean(detail.compress),
-      has_merge: Boolean(detail.merge),
-      compress_prompt_version: detail.compress_run?.prompt_version ?? '',
-      merge_prompt_version: detail.merge_run?.prompt_version ?? '',
+      has_compress: modelRuns.some((r) => r.compress),
+      has_merge: modelRuns.some((r) => r.merge),
+      compress_prompt_version: firstRun?.compress_run?.prompt_version ?? detail.prompt_version,
+      merge_prompt_version: firstRun?.merge_run?.prompt_version ?? '',
       eval_system_prompt: evalSystemPrompt.value,
       eval_result: JSON.parse(JSON.stringify(parsed.data)) as Record<string, unknown>,
       raw_model_output: raw,
       model: requestConfig.model,
       top_k: requestConfig.top_k ?? null,
       temperature: requestConfig.temperature,
+      eval_mode: evalMode,
+      evaluated_models: evaluatedModels,
     })
 
     selectedEvalId.value = saved.id
@@ -257,6 +381,7 @@ async function selectEvalRow(row: RpEvalSummary) {
 }
 
 function onEvalRowClick(row: RpEvalSummary) {
+  historyTab.value = 'eval'
   void selectEvalRow(row)
 }
 
@@ -278,6 +403,14 @@ async function removeEvalRecord() {
 onMounted(async () => {
   syncWithRegistry()
   await loadRpHistoryList()
+  await nextTick()
+  bindModelTableResizeObserver()
+  syncModelTableLayout()
+})
+
+onUnmounted(() => {
+  modelTableResizeObserver?.disconnect()
+  modelTableResizeObserver = null
 })
 </script>
 
@@ -288,6 +421,7 @@ onMounted(async () => {
         <template #actions>
           <el-button size="small" @click="loadRpHistoryList">刷新</el-button>
         </template>
+        <div class="rp-eval-left-body">
         <FilterBar @query="loadRpHistoryList">
           <el-input
             v-model="filterRoleName"
@@ -305,7 +439,7 @@ onMounted(async () => {
             class="record-table"
             size="small"
             :current-row-key="selectedRpHistoryKey"
-            row-key="conversation_key"
+            row-key="history_key"
             @row-click="onRpHistoryRowClick"
           >
             <el-table-column prop="role_name" label="角色" min-width="72" show-overflow-tooltip />
@@ -314,9 +448,16 @@ onMounted(async () => {
                 {{ row.round_start }}-{{ row.round_end }}
               </template>
             </el-table-column>
-            <el-table-column label="类型" width="48">
+            <el-table-column prop="prompt_version" label="SP" width="48" show-overflow-tooltip />
+            <el-table-column label="模型数" width="52" align="center">
               <template #default="{ row }">
-                {{ rpHistoryFlags(row as RpHistorySummary) }}
+                {{
+                  formatRpHistoryModelCount(
+                    row as RpHistorySummary,
+                    selectedRpHistoryKey,
+                    rpHistoryDetail,
+                  )
+                }}
               </template>
             </el-table-column>
           </el-table>
@@ -324,44 +465,128 @@ onMounted(async () => {
             暂无历史，请先在 RP 测试页运行测试
           </p>
 
-          <div class="sub-panel-title sub-panel-title-row">
-            <span>测评历史</span>
-            <el-button
-              size="small"
-              type="danger"
-              plain
-              :disabled="!selectedEvalId"
-              @click="removeEvalRecord"
-            >
-              删除
-            </el-button>
-          </div>
-          <el-table
-            v-loading="evalHistoryLoading"
-            :data="evalHistory"
-            highlight-current-row
-            class="eval-table"
-            size="small"
-            empty-text="暂无测评"
-            @row-click="onEvalRowClick"
-          >
-            <el-table-column label="时间" min-width="88">
-              <template #default="{ row }">
-                {{ formatHistoryTime(row.created_at) }}
-              </template>
-            </el-table-column>
-            <el-table-column label="SP版本" min-width="88" show-overflow-tooltip>
-              <template #default="{ row }">
-                {{ formatEvalPromptVersions(row as RpEvalSummary) }}
-              </template>
-            </el-table-column>
-            <el-table-column label="分" width="40" prop="overall_score" />
-            <el-table-column label="置信" width="52">
-              <template #default="{ row }">
-                {{ formatConfidence(row.overall_confidence) }}
-              </template>
-            </el-table-column>
-          </el-table>
+          <el-tabs v-model="historyTab" class="history-tabs" stretch>
+            <el-tab-pane label="RP测试历史" name="rp-test">
+              <div ref="modelTablePaneRef" class="history-tab-pane-inner">
+                <p v-if="!selectedRpHistoryKey" class="list-hint tab-pane-hint">
+                  请先在上方选择对话
+                </p>
+                <div v-else class="rp-model-table-wrap">
+                  <el-table
+                    v-loading="detailLoading"
+                    :data="modelRuns"
+                    :max-height="modelTableMaxHeight"
+                    class="eval-table rp-test-table"
+                    size="small"
+                    empty-text="暂无测试记录，请先在 RP 测试页运行"
+                    :row-class-name="modelRunRowClassName"
+                    @row-click="onModelRunRowClick"
+                  >
+                    <el-table-column
+                      prop="model"
+                      label="模型"
+                      :min-width="modelTableCompact ? 64 : 80"
+                      show-overflow-tooltip
+                    />
+                    <el-table-column
+                      label="压缩"
+                      :width="modelTableCompact ? 40 : 48"
+                      align="center"
+                      class-name="col-nowrap"
+                    >
+                      <template #default="{ row }">
+                        {{ row.compress ? '有' : '—' }}
+                      </template>
+                    </el-table-column>
+                    <el-table-column
+                      label="合并"
+                      :width="modelTableCompact ? 40 : 48"
+                      align="center"
+                      class-name="col-nowrap"
+                    >
+                      <template #default="{ row }">
+                        {{ row.merge ? '有' : '—' }}
+                      </template>
+                    </el-table-column>
+                    <el-table-column
+                      label="时间"
+                      :min-width="modelTableCompact ? 56 : 68"
+                      class-name="col-nowrap"
+                    >
+                      <template #default="{ row }">
+                        {{ formatHistoryTime(row.latest_updated_at) }}
+                      </template>
+                    </el-table-column>
+                    <el-table-column
+                      label="对比"
+                      :width="modelTableCompact ? 40 : 44"
+                      align="center"
+                      :fixed="modelTableCompact ? false : 'right'"
+                    >
+                      <template #default="{ row }">
+                        <el-checkbox
+                          :model-value="isModelRunChecked(row)"
+                          :disabled="!isModelRunEvaluable(row)"
+                          @click.stop
+                          @change="(v: boolean) => toggleModelCheck(row, v)"
+                        />
+                      </template>
+                    </el-table-column>
+                  </el-table>
+                </div>
+              </div>
+            </el-tab-pane>
+            <el-tab-pane label="测评历史" name="eval">
+              <div class="history-tab-pane-inner">
+                <div class="sub-panel-title sub-panel-title-row tab-pane-toolbar">
+                  <span />
+                  <el-button
+                    size="small"
+                    type="danger"
+                    plain
+                    :disabled="!selectedEvalId || historyTab !== 'eval'"
+                    @click="removeEvalRecord"
+                  >
+                    删除
+                  </el-button>
+                </div>
+                <div class="tab-pane-table-wrap">
+                  <el-table
+                    v-loading="evalHistoryLoading"
+                    :data="evalHistory"
+                    highlight-current-row
+                    class="eval-table"
+                    size="small"
+                    empty-text="暂无测评"
+                    @row-click="onEvalRowClick"
+                  >
+                <el-table-column label="时间" min-width="88">
+                  <template #default="{ row }">
+                    {{ formatHistoryTime(row.created_at) }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="SP版本" min-width="88" show-overflow-tooltip>
+                  <template #default="{ row }">
+                    {{ formatEvalPromptVersions(row as RpEvalSummary) }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="被测" width="48" show-overflow-tooltip>
+                  <template #default="{ row }">
+                    {{ formatEvaluatedModels(row as RpEvalSummary) }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="分" width="40" prop="overall_score" />
+                <el-table-column label="置信" width="52">
+                  <template #default="{ row }">
+                    {{ formatConfidence(row.overall_confidence) }}
+                  </template>
+                </el-table-column>
+              </el-table>
+                </div>
+              </div>
+            </el-tab-pane>
+          </el-tabs>
+        </div>
       </AppPanel>
     </template>
 
@@ -370,7 +595,10 @@ onMounted(async () => {
         <template #actions>
           <el-button size="small" @click="handleResetPrompt">恢复默认</el-button>
         </template>
-          <el-empty v-if="!selectedRpHistoryKey" description="请选择 RP 历史" />
+          <el-empty
+            v-if="!selectedRpHistoryKey"
+            description="请选择对话，并在「RP测试历史」中勾选要对比的模型"
+          />
           <el-form v-else label-width="88px" class="edit-form">
             <el-form-item label="角色">
               <el-input :model-value="rpHistoryDetail?.role_name ?? '—'" disabled />
@@ -385,22 +613,36 @@ onMounted(async () => {
                 disabled
               />
             </el-form-item>
-            <el-form-item label="被测 SP">
+            <el-form-item label="SP 版本">
+              <el-input :model-value="rpHistoryDetail?.prompt_version ?? '—'" disabled />
+            </el-form-item>
+            <el-form-item label="对比模型">
+              <el-input
+                :model-value="formatEvaluatedModelsLabel(checkedEvalModels)"
+                disabled
+              />
+            </el-form-item>
+            <el-form-item label="被测产出">
               <el-input
                 :model-value="
-                  rpHistoryDetail
-                    ? [
-                        rpHistoryDetail.compress_run?.prompt_version
-                          ? `Compress: ${rpHistoryDetail.compress_run.prompt_version}`
-                          : '',
-                        rpHistoryDetail.merge_run?.prompt_version
-                          ? `Merge: ${rpHistoryDetail.merge_run.prompt_version}`
-                          : '',
-                      ]
-                        .filter(Boolean)
-                        .join(' · ') || '—'
+                  selectedModelRuns.length
+                    ? selectedModelRuns
+                        .map(
+                          (run) =>
+                            `${run.model}: ${
+                              [
+                                run.compress ? 'C' : '',
+                                run.merge ? 'M' : '',
+                              ]
+                                .filter(Boolean)
+                                .join('+') || '—'
+                            }`,
+                        )
+                        .join('；')
                     : '—'
                 "
+                type="textarea"
+                :autosize="{ minRows: 1, maxRows: 4 }"
                 disabled
               />
             </el-form-item>
@@ -430,9 +672,8 @@ onMounted(async () => {
               :top-k="runtime.top_k"
               @update:temperature="runtime.temperature = $event"
               @update:top-k="runtime.top_k = $event"
-            />
-            <el-form-item label=" " class="top-k-row">
-              <div class="top-k-row-inner">
+            >
+              <template #top-k-suffix>
                 <el-button
                   type="primary"
                   :loading="evaluating"
@@ -441,8 +682,8 @@ onMounted(async () => {
                 >
                   开始测评
                 </el-button>
-              </div>
-            </el-form-item>
+              </template>
+            </RuntimeParamsFields>
           </el-form>
 
           <div v-if="currentRaw || currentParsed" class="result-block">
@@ -455,13 +696,13 @@ onMounted(async () => {
                   (selectedEvalSummary &&
                     formatEvalPromptVersions(selectedEvalSummary) !== '—') ||
                   (!selectedEvalId &&
-                    rpHistoryDetail &&
+                    evalPayloadDetail &&
                     [
-                      rpHistoryDetail.compress_run?.prompt_version
-                        ? `C:${rpHistoryDetail.compress_run.prompt_version}`
+                      evalPayloadDetail.compress_run?.prompt_version
+                        ? `C:${evalPayloadDetail.compress_run.prompt_version}`
                         : '',
-                      rpHistoryDetail.merge_run?.prompt_version
-                        ? `M:${rpHistoryDetail.merge_run.prompt_version}`
+                      evalPayloadDetail.merge_run?.prompt_version
+                        ? `M:${evalPayloadDetail.merge_run.prompt_version}`
                         : '',
                     ]
                       .filter(Boolean)
@@ -473,11 +714,11 @@ onMounted(async () => {
                   selectedEvalSummary
                     ? formatEvalPromptVersions(selectedEvalSummary)
                     : [
-                        rpHistoryDetail?.compress_run?.prompt_version
-                          ? `C:${rpHistoryDetail.compress_run.prompt_version}`
+                        evalPayloadDetail?.compress_run?.prompt_version
+                          ? `C:${evalPayloadDetail.compress_run.prompt_version}`
                           : '',
-                        rpHistoryDetail?.merge_run?.prompt_version
-                          ? `M:${rpHistoryDetail.merge_run.prompt_version}`
+                        evalPayloadDetail?.merge_run?.prompt_version
+                          ? `M:${evalPayloadDetail.merge_run.prompt_version}`
                           : '',
                       ]
                         .filter(Boolean)
@@ -492,7 +733,7 @@ onMounted(async () => {
           <el-empty
             v-else
             class="result-empty"
-            description="运行测评或点击左侧测评历史查看结果"
+            description="在「RP测试历史」确认产出后运行测评，或在「测评历史」查看记录"
             :image-size="56"
           />
         </div>
@@ -512,17 +753,6 @@ onMounted(async () => {
 
 .content-editor :deep(.el-textarea__inner) {
   min-height: 180px;
-}
-
-.top-k-row-inner {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  width: 100%;
-}
-
-.top-k-row-inner .el-button {
-  margin-left: auto;
 }
 
 .result-block {
@@ -554,5 +784,102 @@ onMounted(async () => {
 .result-empty {
   flex: 1;
   padding: 12px;
+}
+
+.tab-pane-hint {
+  padding: 6px 12px 8px;
+  flex-shrink: 0;
+}
+
+.rp-eval-left-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.rp-eval-left-body :deep(.record-table) {
+  flex: 0 1 auto;
+  max-height: 38%;
+  min-height: 120px;
+}
+
+.rp-eval-left-body .history-tabs {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 关键：让 Tab 内容区与每个 tab-pane 成为受约束的 flex 列容器，
+   否则内层会被内容撑高，clientHeight 失真，导致表格无法滚动。 */
+.rp-eval-left-body .history-tabs :deep(.el-tabs__content) {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.rp-eval-left-body .history-tabs :deep(.el-tab-pane) {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.history-tab-pane-inner {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.rp-model-table-wrap {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+.rp-test-table {
+  width: 100% !important;
+}
+
+.rp-test-table :deep(.el-table__body-wrapper) {
+  scrollbar-width: thin;
+  scrollbar-color: #b1b3b8 transparent;
+}
+
+.rp-test-table :deep(.el-table__body-wrapper::-webkit-scrollbar) {
+  width: 8px;
+  height: 8px;
+}
+
+.rp-test-table :deep(.el-table__body-wrapper::-webkit-scrollbar-thumb) {
+  background-color: #b1b3b8;
+  border-radius: 4px;
+}
+
+.rp-test-table :deep(.el-table__body-wrapper::-webkit-scrollbar-thumb:hover) {
+  background-color: #909399;
+}
+
+.rp-test-table :deep(.el-table__cell) {
+  padding: 5px 0;
+}
+
+.rp-test-table :deep(.cell) {
+  padding: 0 6px;
+  font-size: 12px;
+}
+
+.tab-pane-toolbar {
+  border-top: none;
+  min-height: 36px;
+}
+
+:deep(.rp-test-row--selected > td) {
+  background-color: #ecf5ff !important;
 }
 </style>

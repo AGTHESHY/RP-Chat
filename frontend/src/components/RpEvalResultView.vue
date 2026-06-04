@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import {
+  isMultiCompareEval,
   parseRpEvalJson,
+  type RpEvalModelScore,
   type RpEvalModuleResult,
   type RpEvalParsed,
 } from '../utils/parseRpEvalJson'
@@ -19,6 +21,12 @@ const parseResult = computed(() => {
   return parseRpEvalJson(props.rawContent)
 })
 
+const isMulti = computed(() =>
+  parseResult.value.ok && parseResult.value.data
+    ? isMultiCompareEval(parseResult.value.data)
+    : false,
+)
+
 function confidenceTagType(confidence: number): 'success' | 'warning' | 'danger' {
   if (confidence >= 0.8) return 'success'
   if (confidence >= 0.5) return 'warning'
@@ -28,6 +36,10 @@ function confidenceTagType(confidence: number): 'success' | 'warning' | 'danger'
 function moduleTitle(module: RpEvalModuleResult, label: string): string {
   if (!module.available) return `${label}（未参与）`
   return `${label} · ${module.subscore} 分`
+}
+
+function renderModelModules(ms: RpEvalModelScore) {
+  return { ms, seg: ms.segment_compress, merge: ms.history_merge, cross: ms.cross_consistency }
 }
 </script>
 
@@ -43,94 +55,191 @@ function moduleTitle(module: RpEvalModuleResult, label: string): string {
     <div class="overall-block">
       <div class="overall-scores">
         <span class="overall-score">{{ parseResult.data.overall_score }}</span>
-        <span class="overall-label">综合分</span>
+        <span class="overall-label">{{ isMulti ? '对比均分' : '综合分' }}</span>
         <el-tag :type="confidenceTagType(parseResult.data.overall_confidence)" size="small">
           置信度 {{ formatConfidence(parseResult.data.overall_confidence) }}
+        </el-tag>
+        <el-tag v-if="isMulti" type="info" size="small">
+          {{ parseResult.data.model_scores.length }} 模型对比
         </el-tag>
       </div>
       <p v-if="parseResult.data.summary" class="summary">{{ parseResult.data.summary }}</p>
     </div>
 
-    <section
-      v-if="parseResult.data.segment_compress.available"
-      class="module-section"
-    >
-      <h4 class="module-title">
-        {{ moduleTitle(parseResult.data.segment_compress, 'Segment 压缩') }}
-        <el-tag
-          :type="confidenceTagType(parseResult.data.segment_compress.confidence)"
-          size="small"
-        >
-          模块置信 {{ formatConfidence(parseResult.data.segment_compress.confidence) }}
-        </el-tag>
-      </h4>
-      <div
-        v-for="dim in parseResult.data.segment_compress.dimensions"
-        :key="dim.id"
-        class="dimension-card"
+    <section v-if="isMulti" class="module-section model-compare-section">
+      <h4 class="module-title">各模型得分</h4>
+      <el-table
+        :data="parseResult.data.model_scores"
+        size="small"
+        class="model-score-table"
+        stripe
       >
-        <div class="dim-header">
-          <span class="dim-name">{{ dim.name }}</span>
-          <span class="dim-score">{{ dim.score }}</span>
-          <el-tag :type="confidenceTagType(dim.confidence)" size="small">
-            {{ formatConfidence(dim.confidence) }}
+        <el-table-column prop="model" label="模型" min-width="100" show-overflow-tooltip />
+        <el-table-column label="综合分" width="64" align="center">
+          <template #default="{ row }">
+            <span class="table-score">{{ row.overall_score }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="压缩" width="52" align="center">
+          <template #default="{ row }">
+            {{ row.segment_compress.available ? row.segment_compress.subscore : '—' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="合并" width="52" align="center">
+          <template #default="{ row }">
+            {{ row.history_merge.available ? row.history_merge.subscore : '—' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="置信" width="56" align="center">
+          <template #default="{ row }">
+            {{ formatConfidence(row.overall_confidence) }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="summary" label="简评" min-width="120" show-overflow-tooltip />
+      </el-table>
+
+      <div
+        v-if="parseResult.data.cross_model_comparison?.available"
+        class="cross-model-block"
+      >
+        <h4 class="module-title">
+          横向对比 · {{ parseResult.data.cross_model_comparison.score }} 分
+          <el-tag
+            :type="confidenceTagType(parseResult.data.cross_model_comparison.confidence)"
+            size="small"
+          >
+            {{ formatConfidence(parseResult.data.cross_model_comparison.confidence) }}
           </el-tag>
-        </div>
-        <el-progress :percentage="dim.score" :stroke-width="8" :show-text="false" />
-        <p v-if="dim.evidence" class="dim-evidence">{{ dim.evidence }}</p>
-        <ul v-if="dim.issues.length" class="dim-issues">
-          <li v-for="(issue, i) in dim.issues" :key="i">{{ issue }}</li>
-        </ul>
+        </h4>
+        <p
+          v-if="parseResult.data.cross_model_comparison.ranking.length"
+          class="ranking-line"
+        >
+          推荐排序：{{ parseResult.data.cross_model_comparison.ranking.join(' › ') }}
+        </p>
+        <p v-if="parseResult.data.cross_model_comparison.notes" class="cross-notes">
+          {{ parseResult.data.cross_model_comparison.notes }}
+        </p>
       </div>
+
+      <el-collapse class="model-detail-collapse">
+        <el-collapse-item
+          v-for="item in parseResult.data.model_scores.map(renderModelModules)"
+          :key="item.ms.model"
+          :title="`${item.ms.model} · ${item.ms.overall_score} 分`"
+          :name="item.ms.model"
+        >
+          <p v-if="item.ms.summary" class="model-summary">{{ item.ms.summary }}</p>
+          <section v-if="item.seg.available" class="nested-module">
+            <h5 class="nested-title">{{ moduleTitle(item.seg, 'Segment 压缩') }}</h5>
+            <div v-for="dim in item.seg.dimensions" :key="dim.id" class="dimension-card compact">
+              <div class="dim-header">
+                <span class="dim-name">{{ dim.name }}</span>
+                <span class="dim-score">{{ dim.score }}</span>
+              </div>
+              <el-progress :percentage="dim.score" :stroke-width="6" :show-text="false" />
+            </div>
+          </section>
+          <section v-if="item.merge.available" class="nested-module">
+            <h5 class="nested-title">{{ moduleTitle(item.merge, 'History 合并') }}</h5>
+            <div
+              v-for="dim in item.merge.dimensions"
+              :key="dim.id"
+              class="dimension-card compact"
+            >
+              <div class="dim-header">
+                <span class="dim-name">{{ dim.name }}</span>
+                <span class="dim-score">{{ dim.score }}</span>
+              </div>
+              <el-progress :percentage="dim.score" :stroke-width="6" :show-text="false" />
+            </div>
+          </section>
+        </el-collapse-item>
+      </el-collapse>
     </section>
 
-    <section v-if="parseResult.data.history_merge.available" class="module-section">
-      <h4 class="module-title">
-        {{ moduleTitle(parseResult.data.history_merge, 'History 合并') }}
-        <el-tag
-          :type="confidenceTagType(parseResult.data.history_merge.confidence)"
-          size="small"
-        >
-          模块置信 {{ formatConfidence(parseResult.data.history_merge.confidence) }}
-        </el-tag>
-      </h4>
-      <div
-        v-for="dim in parseResult.data.history_merge.dimensions"
-        :key="dim.id"
-        class="dimension-card"
+    <template v-else>
+      <section
+        v-if="parseResult.data.segment_compress.available"
+        class="module-section"
       >
-        <div class="dim-header">
-          <span class="dim-name">{{ dim.name }}</span>
-          <span class="dim-score">{{ dim.score }}</span>
-          <el-tag :type="confidenceTagType(dim.confidence)" size="small">
-            {{ formatConfidence(dim.confidence) }}
+        <h4 class="module-title">
+          {{ moduleTitle(parseResult.data.segment_compress, 'Segment 压缩') }}
+          <el-tag
+            :type="confidenceTagType(parseResult.data.segment_compress.confidence)"
+            size="small"
+          >
+            模块置信 {{ formatConfidence(parseResult.data.segment_compress.confidence) }}
           </el-tag>
-        </div>
-        <el-progress :percentage="dim.score" :stroke-width="8" :show-text="false" />
-        <p v-if="dim.evidence" class="dim-evidence">{{ dim.evidence }}</p>
-        <ul v-if="dim.issues.length" class="dim-issues">
-          <li v-for="(issue, i) in dim.issues" :key="i">{{ issue }}</li>
-        </ul>
-      </div>
-    </section>
-
-    <section
-      v-if="parseResult.data.cross_consistency.available"
-      class="module-section cross-section"
-    >
-      <h4 class="module-title">
-        交叉一致性 · {{ parseResult.data.cross_consistency.score }} 分
-        <el-tag
-          :type="confidenceTagType(parseResult.data.cross_consistency.confidence)"
-          size="small"
+        </h4>
+        <div
+          v-for="dim in parseResult.data.segment_compress.dimensions"
+          :key="dim.id"
+          class="dimension-card"
         >
-          {{ formatConfidence(parseResult.data.cross_consistency.confidence) }}
-        </el-tag>
-      </h4>
-      <p v-if="parseResult.data.cross_consistency.notes" class="cross-notes">
-        {{ parseResult.data.cross_consistency.notes }}
-      </p>
-    </section>
+          <div class="dim-header">
+            <span class="dim-name">{{ dim.name }}</span>
+            <span class="dim-score">{{ dim.score }}</span>
+            <el-tag :type="confidenceTagType(dim.confidence)" size="small">
+              {{ formatConfidence(dim.confidence) }}
+            </el-tag>
+          </div>
+          <el-progress :percentage="dim.score" :stroke-width="8" :show-text="false" />
+          <p v-if="dim.evidence" class="dim-evidence">{{ dim.evidence }}</p>
+          <ul v-if="dim.issues.length" class="dim-issues">
+            <li v-for="(issue, i) in dim.issues" :key="i">{{ issue }}</li>
+          </ul>
+        </div>
+      </section>
+
+      <section v-if="parseResult.data.history_merge.available" class="module-section">
+        <h4 class="module-title">
+          {{ moduleTitle(parseResult.data.history_merge, 'History 合并') }}
+          <el-tag
+            :type="confidenceTagType(parseResult.data.history_merge.confidence)"
+            size="small"
+          >
+            模块置信 {{ formatConfidence(parseResult.data.history_merge.confidence) }}
+          </el-tag>
+        </h4>
+        <div
+          v-for="dim in parseResult.data.history_merge.dimensions"
+          :key="dim.id"
+          class="dimension-card"
+        >
+          <div class="dim-header">
+            <span class="dim-name">{{ dim.name }}</span>
+            <span class="dim-score">{{ dim.score }}</span>
+            <el-tag :type="confidenceTagType(dim.confidence)" size="small">
+              {{ formatConfidence(dim.confidence) }}
+            </el-tag>
+          </div>
+          <el-progress :percentage="dim.score" :stroke-width="8" :show-text="false" />
+          <p v-if="dim.evidence" class="dim-evidence">{{ dim.evidence }}</p>
+          <ul v-if="dim.issues.length" class="dim-issues">
+            <li v-for="(issue, i) in dim.issues" :key="i">{{ issue }}</li>
+          </ul>
+        </div>
+      </section>
+
+      <section
+        v-if="parseResult.data.cross_consistency.available"
+        class="module-section cross-section"
+      >
+        <h4 class="module-title">
+          交叉一致性 · {{ parseResult.data.cross_consistency.score }} 分
+          <el-tag
+            :type="confidenceTagType(parseResult.data.cross_consistency.confidence)"
+            size="small"
+          >
+            {{ formatConfidence(parseResult.data.cross_consistency.confidence) }}
+          </el-tag>
+        </h4>
+        <p v-if="parseResult.data.cross_consistency.notes" class="cross-notes">
+          {{ parseResult.data.cross_consistency.notes }}
+        </p>
+      </section>
+    </template>
 
     <section v-if="parseResult.data.recommendations.length" class="recommendations">
       <h4 class="module-title">改进建议</h4>
@@ -183,6 +292,49 @@ function moduleTitle(module: RpEvalModuleResult, label: string): string {
 .module-section {
   border-top: 1px solid #ebeef5;
   padding-top: 12px;
+}
+
+.model-score-table {
+  margin-bottom: 12px;
+}
+
+.table-score {
+  font-weight: 600;
+}
+
+.ranking-line {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: #303133;
+}
+
+.cross-model-block {
+  margin-bottom: 12px;
+}
+
+.model-detail-collapse {
+  border: none;
+}
+
+.model-summary {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: #606266;
+}
+
+.nested-module {
+  margin-bottom: 12px;
+}
+
+.nested-title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.dimension-card.compact {
+  margin-bottom: 8px;
+  padding: 8px;
 }
 
 .module-title {

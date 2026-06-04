@@ -273,6 +273,7 @@ def migrate_prompt_test_result_schema(db: Session) -> None:
                         role_id VARCHAR(32) NOT NULL,
                         app_name VARCHAR(128) NOT NULL DEFAULT '',
                         role_name VARCHAR(128) NOT NULL DEFAULT '',
+                        run_group_id INT NOT NULL DEFAULT 0,
                         prompt_type VARCHAR(64) NOT NULL,
                         expected_result LONGTEXT NOT NULL,
                         round_start INT NOT NULL DEFAULT 1,
@@ -283,10 +284,11 @@ def migrate_prompt_test_result_schema(db: Session) -> None:
                         temperature DOUBLE NOT NULL DEFAULT 0,
                         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                        UNIQUE KEY uk_prompt_test_result_conv_type (user_id, role_id, app_name, prompt_type),
                         INDEX idx_prompt_test_user (user_id),
                         INDEX idx_prompt_test_role (role_id),
-                        INDEX idx_prompt_test_type (prompt_type)
+                        INDEX idx_prompt_test_type (prompt_type),
+                        INDEX idx_prompt_test_run_group (user_id, role_id, app_name, run_group_id),
+                        UNIQUE KEY uk_prompt_test_run_model_type (run_group_id, model, prompt_type)
                     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
                     """
                 )
@@ -304,10 +306,56 @@ def migrate_prompt_test_result_schema(db: Session) -> None:
             alters.append("ADD COLUMN top_k INT NULL AFTER model")
         if "temperature" not in columns:
             alters.append("ADD COLUMN temperature DOUBLE NOT NULL DEFAULT 0 AFTER top_k")
+        if "run_group_id" not in columns:
+            alters.append(
+                "ADD COLUMN run_group_id INT NOT NULL DEFAULT 0 AFTER role_name"
+            )
         if alters:
             with engine.begin() as conn:
                 conn.execute(
                     text(f"ALTER TABLE prompt_test_results {', '.join(alters)}")
+                )
+        columns = {column["name"] for column in inspector.get_columns("prompt_test_results")}
+        if "run_group_id" in columns:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "UPDATE prompt_test_results SET run_group_id = id "
+                        "WHERE run_group_id = 0"
+                    )
+                )
+        indexes = {idx["name"] for idx in inspector.get_indexes("prompt_test_results")}
+        if "uk_prompt_test_result_conv_type" in indexes:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE prompt_test_results "
+                        "DROP INDEX uk_prompt_test_result_conv_type"
+                    )
+                )
+        indexes = {idx["name"] for idx in inspector.get_indexes("prompt_test_results")}
+        if "idx_prompt_test_run_group" not in indexes:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "CREATE INDEX idx_prompt_test_run_group ON prompt_test_results "
+                        "(user_id, role_id, app_name, run_group_id)"
+                    )
+                )
+
+        indexes = {idx["name"] for idx in inspector.get_indexes("prompt_test_results")}
+        if "uk_prompt_test_run_model_type" not in indexes:
+            from prompt_test_result_service import regroup_prompt_test_run_groups
+
+            regroup_prompt_test_run_groups(db)
+            indexes = {idx["name"] for idx in inspector.get_indexes("prompt_test_results")}
+        if "uk_prompt_test_run_model_type" not in indexes:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX uk_prompt_test_run_model_type "
+                        "ON prompt_test_results (run_group_id, model, prompt_type)"
+                    )
                 )
 
 
@@ -340,6 +388,8 @@ def migrate_rp_eval_schema(db: Session) -> None:
                         temperature DOUBLE NOT NULL DEFAULT 0,
                         overall_score INT NOT NULL DEFAULT 0,
                         overall_confidence DOUBLE NOT NULL DEFAULT 0,
+                        eval_mode VARCHAR(32) NOT NULL DEFAULT 'single',
+                        evaluated_models LONGTEXT NOT NULL DEFAULT '[]',
                         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                         INDEX idx_rp_eval_conv (user_id, role_id, app_name),
                         INDEX idx_rp_eval_created (created_at)
@@ -359,6 +409,16 @@ def migrate_rp_eval_schema(db: Session) -> None:
             alters.append(
                 "ADD COLUMN merge_prompt_version VARCHAR(64) NOT NULL DEFAULT '' "
                 "AFTER compress_prompt_version"
+            )
+        if "eval_mode" not in columns:
+            alters.append(
+                "ADD COLUMN eval_mode VARCHAR(32) NOT NULL DEFAULT 'single' "
+                "AFTER overall_confidence"
+            )
+        if "evaluated_models" not in columns:
+            alters.append(
+                "ADD COLUMN evaluated_models LONGTEXT NOT NULL "
+                "DEFAULT '[]' AFTER eval_mode"
             )
         if alters:
             with engine.begin() as conn:

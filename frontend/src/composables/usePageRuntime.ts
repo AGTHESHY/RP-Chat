@@ -29,7 +29,13 @@ function createPageRuntime(scope: RuntimeScope) {
     const profile = getProfile(profileId)
     if (!profile) return
     runtime.value.apiProfileId = profile.id
-    runtime.value.modelName = pickModelForProfile(profile, runtime.value.modelName)
+    const kept = (runtime.value.modelNames ?? []).filter((m) => profile.models.includes(m))
+    const names =
+      kept.length > 0
+        ? kept
+        : [pickModelForProfile(profile, runtime.value.modelName)].filter(Boolean)
+    runtime.value.modelNames = names
+    runtime.value.modelName = names[0] ?? pickModelForProfile(profile, '')
     persistRuntime()
   }
 
@@ -37,7 +43,26 @@ function createPageRuntime(scope: RuntimeScope) {
     const profile = getProfile(runtime.value.apiProfileId)
     if (!profile || !profile.models.includes(modelName)) return
     runtime.value.modelName = modelName
+    runtime.value.modelNames = [modelName]
     persistRuntime()
+  }
+
+  function setSelectedModels(modelNames: string[]) {
+    const profile = getProfile(runtime.value.apiProfileId)
+    if (!profile) return
+    const valid = modelNames.filter((m) => profile.models.includes(m))
+    runtime.value.modelNames = valid
+    runtime.value.modelName = valid[0] ?? ''
+    persistRuntime()
+  }
+
+  function toggleModelSelection(modelName: string, checked: boolean) {
+    const profile = getProfile(runtime.value.apiProfileId)
+    if (!profile || !profile.models.includes(modelName)) return
+    const set = new Set(selectedModelNames.value)
+    if (checked) set.add(modelName)
+    else set.delete(modelName)
+    setSelectedModels([...set])
   }
 
   function syncWithRegistry() {
@@ -49,9 +74,18 @@ function createPageRuntime(scope: RuntimeScope) {
 
   const availableModels = computed(() => currentProfile.value?.models ?? [])
 
-  const hasValidRuntime = computed(() =>
-    Boolean(resolveRuntimeRequest(registry.value, runtime.value)),
-  )
+  const selectedModelNames = computed(() => {
+    const names = runtime.value.modelNames ?? []
+    if (names.length > 0) return names
+    return runtime.value.modelName ? [runtime.value.modelName] : []
+  })
+
+  const hasValidRuntime = computed(() => {
+    if (!currentProfile.value?.base_url.trim() || !currentProfile.value?.api_key.trim()) {
+      return false
+    }
+    return selectedModelNames.value.length > 0
+  })
 
   const resolvedRequest = computed(() => resolveRuntimeRequest(registry.value, runtime.value))
 
@@ -88,6 +122,9 @@ function createPageRuntime(scope: RuntimeScope) {
     resolvedRequest,
     switchProfile,
     switchModel,
+    selectedModelNames,
+    setSelectedModels,
+    toggleModelSelection,
     syncWithRegistry,
     persistRuntime,
     resolveRequestWithModelFallback,

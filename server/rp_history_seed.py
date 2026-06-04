@@ -45,13 +45,17 @@ def seed_mandy_rp_history(db: Session) -> int:
         ("segment_compress", MANDY_COMPRESS_FILE),
         ("history_merge", MANDY_MERGE_FILE),
     ]
+    model = (meta.get("model") or "").strip() or "seed-import"
+    prompt_version = (meta.get("prompt_version") or "").strip()
+    run_group_id: int | None = None
+
     for prompt_type, path in seeds:
         if _has_result(db, user_id=user_id, role_id=role_id, app_name=app_name, prompt_type=prompt_type):
             continue
         if not path.is_file():
             continue
         expected_result = json.loads(path.read_text(encoding="utf-8"))
-        save_prompt_test_result(
+        saved = save_prompt_test_result(
             db,
             PromptTestResultSaveRequest(
                 user_id=user_id,
@@ -62,8 +66,13 @@ def seed_mandy_rp_history(db: Session) -> int:
                 expected_result=expected_result,
                 round_start=meta.get("round_start", 1),
                 round_end=meta.get("round_end", 10),
+                prompt_version=prompt_version,
+                model=model,
+                run_group_id=run_group_id,
             ),
         )
+        if run_group_id is None and saved.get("run_group_id") is not None:
+            run_group_id = int(saved["run_group_id"])
         inserted += 1
 
     return inserted

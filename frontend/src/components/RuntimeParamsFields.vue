@@ -21,13 +21,29 @@ const emit = defineEmits<{
       @update:model-value="emit('update:temperature', $event as number)"
     />
   </el-form-item>
-  <el-form-item label="top_k" :label-width="labelWidth">
-    <el-input-number
-      :model-value="topK ?? undefined"
-      :min="1"
-      :max="100"
-      :step="1"
-      @update:model-value="emit('update:topK', ($event as number) ?? null)"
-    />
+  <el-form-item label="top_k" :label-width="labelWidth" class="runtime-top-k-item">
+    <div class="runtime-top-k-row">
+      <el-input-number
+        :model-value="topK ?? undefined"
+        :min="1"
+        :max="100"
+        :step="1"
+        @update:model-value="emit('update:topK', ($event as number) ?? null)"
+      />
+      <slot name="top-k-suffix" />
+    </div>
   </el-form-item>
 </template>
+
+<style scoped>
+.runtime-top-k-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+
+.runtime-top-k-row :deep(.el-button) {
+  margin-left: auto;
+}
+</style>

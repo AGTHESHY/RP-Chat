@@ -38,6 +38,8 @@ export interface ApiProfileRegistry {
 export interface PageRuntimeConfig {
   apiProfileId: string
   modelName: string
+  /** 测试页多模型并行；为空时回退为 modelName */
+  modelNames?: string[]
   temperature: number
   top_k: number | null
 }
@@ -242,9 +244,14 @@ export function normalizeRuntimeConfig(
   }
   let profile = getProfileById(registry, runtime.apiProfileId) ?? first
   const modelName = pickModelForProfile(profile, runtime.modelName)
+  const rawNames = Array.isArray(runtime.modelNames) ? runtime.modelNames : []
+  const modelNames = rawNames.filter((m) => profile.models.includes(m))
+  const effectiveNames =
+    modelNames.length > 0 ? modelNames : modelName ? [modelName] : []
   return {
     apiProfileId: profile.id,
-    modelName,
+    modelName: effectiveNames[0] ?? modelName,
+    modelNames: effectiveNames,
     temperature: runtime.temperature ?? defaultRuntimeConfig.temperature,
     top_k: runtime.top_k ?? defaultRuntimeConfig.top_k,
   }
@@ -296,7 +303,7 @@ export function resolveRuntimeRequest(
   const normalized = normalizeRuntimeConfig(runtime, registry)
   const profile = getProfileById(registry, normalized.apiProfileId)
   if (!profile) return null
-  const model = normalized.modelName || modelFallback
+  const model = modelFallback.trim() || normalized.modelName
   if (!profile.base_url.trim() || !profile.api_key.trim() || !model.trim()) {
     return null
   }

@@ -58,6 +58,7 @@ export interface PromptTestResultSummary {
   role_id: string
   app_name: string
   role_name: string
+  run_group_id: number
   prompt_type: PromptType
   round_start: number
   round_end: number
@@ -78,6 +79,7 @@ export function listPromptTestResults(params?: {
   role_id?: string
   role_name?: string
   prompt_type?: string
+  run_group_id?: number
 }) {
   return request<PromptTestResultSummary[]>(
     `/api/prompt-test-results${buildQuery(params ?? {})}`,
@@ -93,12 +95,16 @@ export function getPromptTestResultByConversation(params: {
   role_id: string
   app_name: string
   prompt_type: PromptType
+  model?: string
+  run_group_id?: number
 }) {
   const search = new URLSearchParams()
   search.set('user_id', params.user_id)
   search.set('role_id', params.role_id)
   search.set('app_name', params.app_name)
   search.set('prompt_type', params.prompt_type)
+  if (params.model) search.set('model', params.model)
+  if (params.run_group_id != null) search.set('run_group_id', String(params.run_group_id))
   return request<PromptTestResultDetail>(
     `/api/prompt-test-results/by-conversation?${search.toString()}`,
   )
@@ -117,6 +123,8 @@ export function savePromptTestResult(body: {
   model: string
   top_k: number | null
   temperature: number
+  /** 重跑：归属到该请求，按 model+prompt_type upsert */
+  run_group_id?: number
 }) {
   return request<PromptTestResultDetail>('/api/prompt-test-results', {
     method: 'POST',
@@ -127,14 +135,30 @@ export function savePromptTestResult(body: {
 
 export interface RpHistorySummary {
   conversation_key: string
+  /** 唯一标识一次测试请求 */
+  history_key: string
+  run_group_id: number
   user_id: string
   role_id: string
   app_name: string
   role_name: string
+  prompt_version: string
   has_compress: boolean
   has_merge: boolean
+  model_count: number
   round_start: number
   round_end: number
+  latest_updated_at: string | null
+}
+
+export interface RpHistoryModelRun {
+  model: string
+  compress_record_id: number | null
+  merge_record_id: number | null
+  compress: Record<string, unknown> | null
+  merge: Record<string, unknown> | null
+  compress_run: RpHistoryRunMeta | null
+  merge_run: RpHistoryRunMeta | null
   latest_updated_at: string | null
 }
 
@@ -148,14 +172,21 @@ export interface RpHistoryRunMeta {
 
 export interface RpHistoryDetail {
   conversation_key: string
+  history_key: string
+  run_group_id: number
   user_id: string
   role_id: string
   app_name: string
   role_name: string
+  prompt_version: string
   round_start: number
   round_end: number
+  model_runs: RpHistoryModelRun[]
+  /** 未指定 model 时取最近更新的模型 run */
   compress: Record<string, unknown> | null
   merge: Record<string, unknown> | null
+  compress_record_id: number | null
+  merge_record_id: number | null
   compress_updated_at: string | null
   merge_updated_at: string | null
   compress_run: RpHistoryRunMeta | null
@@ -174,11 +205,19 @@ export function getRpHistoryDetail(params: {
   user_id: string
   role_id: string
   app_name: string
+  run_group_id?: number
+  model?: string
 }) {
   const search = new URLSearchParams()
   search.set('user_id', params.user_id)
   search.set('role_id', params.role_id)
   search.set('app_name', params.app_name)
+  if (params.run_group_id != null) {
+    search.set('run_group_id', String(params.run_group_id))
+  }
+  if (params.model) {
+    search.set('model', params.model)
+  }
   return request<RpHistoryDetail>(`/api/rp-history/detail?${search.toString()}`)
 }
 
@@ -518,6 +557,8 @@ export interface RpEvalSummary {
   compress_prompt_version: string
   merge_prompt_version: string
   model: string
+  eval_mode: 'single' | 'multi_compare'
+  evaluated_models: string[]
   overall_score: number
   overall_confidence: number
   created_at: string | null
@@ -548,6 +589,8 @@ export interface RpEvalSavePayload {
   model: string
   top_k: number | null
   temperature: number
+  eval_mode?: 'single' | 'multi_compare'
+  evaluated_models?: string[]
 }
 
 export function listRpEvaluations(params: {

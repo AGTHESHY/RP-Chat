@@ -79,10 +79,6 @@ const canRunBrain = computed(
   () => Boolean(selectedEvalId.value && selectedEvalDetail.value && resolvedRequest.value),
 )
 
-function rpHistoryFlags(row: RpHistorySummary): string {
-  return [row.has_compress ? 'C' : '', row.has_merge ? 'M' : ''].filter(Boolean).join('') || '—'
-}
-
 watch(brainSystemPrompt, (text) => {
   saveBrainSystemPrompt(text)
 })
@@ -119,7 +115,7 @@ async function loadRpHistoryList() {
     }
     if (
       !selectedRpHistoryKey.value ||
-      !rpHistoryList.value.some((item) => item.conversation_key === selectedRpHistoryKey.value)
+      !rpHistoryList.value.some((item) => item.history_key === selectedRpHistoryKey.value)
     ) {
       selectRpHistory(rpHistoryList.value[0])
     }
@@ -132,7 +128,7 @@ async function loadRpHistoryList() {
 }
 
 function selectRpHistory(row: RpHistorySummary) {
-  selectedRpHistoryKey.value = row.conversation_key
+  selectedRpHistoryKey.value = row.history_key
 }
 
 function onRpHistoryRowClick(row: { conversation_key?: string }) {
@@ -144,13 +140,14 @@ async function syncRpHistorySelection(key: string) {
     rpHistoryDetail.value = null
     return
   }
-  const summary = rpHistoryList.value.find((item) => item.conversation_key === key)
+  const summary = rpHistoryList.value.find((item) => item.history_key === key)
   if (!summary) return
   try {
     rpHistoryDetail.value = await getRpHistoryDetail({
       user_id: summary.user_id,
       role_id: summary.role_id,
       app_name: summary.app_name,
+      run_group_id: summary.run_group_id,
     })
   } catch (error) {
     rpHistoryDetail.value = null
@@ -395,7 +392,7 @@ onMounted(async () => {
           class="record-table"
           size="small"
           :current-row-key="selectedRpHistoryKey"
-          row-key="conversation_key"
+          row-key="history_key"
           @row-click="onRpHistoryRowClick"
         >
           <el-table-column prop="role_name" label="角色" min-width="72" show-overflow-tooltip />
@@ -404,11 +401,12 @@ onMounted(async () => {
               {{ row.round_start }}-{{ row.round_end }}
             </template>
           </el-table-column>
-          <el-table-column label="类型" width="48">
-            <template #default="{ row }">
-              {{ rpHistoryFlags(row as RpHistorySummary) }}
-            </template>
-          </el-table-column>
+            <el-table-column prop="prompt_version" label="SP" width="48" show-overflow-tooltip />
+            <el-table-column label="模型数" width="52" align="center">
+              <template #default="{ row }">
+                {{ (row as RpHistorySummary).model_count }}
+              </template>
+            </el-table-column>
         </el-table>
         <p v-if="!rpHistoryLoading && rpHistoryList.length === 0" class="list-hint">
           暂无历史，请先在 RP 测试页运行测试

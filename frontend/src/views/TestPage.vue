@@ -13,6 +13,7 @@ import {
   runChatCompletion,
   savePromptTestResult,
   type ChatCompletionResponse,
+  type PromptTestResultDetail,
   type ChatQaConversationSummary,
   type PromptLang,
   type PromptType,
@@ -20,9 +21,11 @@ import {
   type RpHistoryRunMeta,
   type RpHistorySummary,
 } from '../api'
+import { formatHistoryTime } from '../utils/format'
 import ApiRuntimePicker from '../components/ApiRuntimePicker.vue'
 import ResultPanel from '../components/ResultPanel.vue'
 import { usePageRuntime } from '../composables/usePageRuntime'
+import type { ResolvedRuntimeRequest } from '../utils/apiProfileStorage'
 import {
   buildHistoryMergePayload,
   buildSegmentCompressPayload,
@@ -34,7 +37,15 @@ import {
 } from '../utils/conversationPayload'
 
 const testRuntime = usePageRuntime('test')
-const { runtime, registry, resolvedRequest, syncWithRegistry, persistRuntime } = testRuntime
+const {
+  runtime,
+  registry,
+  resolvedRequest,
+  selectedModelNames,
+  syncWithRegistry,
+  persistRuntime,
+  resolveRequestWithModelFallback,
+} = testRuntime
 const versionOptions = ref<string[]>(['v1', 'v2'])
 const version = ref('v2')
 const promptType = ref<PromptType>('segment_compress')
@@ -73,14 +84,21 @@ interface TestStepResult {
   reasoningContent: string
 }
 
+interface ModelRunBundle {
+  model: string
+  steps: TestStepResult[]
+  error?: string
+}
+
 const stepResults = ref<TestStepResult[]>([])
+const modelRunBundles = ref<ModelRunBundle[]>([])
 
 const rpHistoryOptions = ref<RpHistorySummary[]>([])
 const selectedRpHistoryKey = ref('')
 
 const selectedRpHistorySummary = computed(
   () =>
-    rpHistoryOptions.value.find((item) => item.conversation_key === selectedRpHistoryKey.value) ??
+    rpHistoryOptions.value.find((item) => item.history_key === selectedRpHistoryKey.value) ??
     null,
 )
 
@@ -241,11 +259,8 @@ async function executeTestStep(
   type: PromptType,
   userPayload: Record<string, unknown>,
   systemPromptText: string,
+  requestConfig: ResolvedRuntimeRequest,
 ): Promise<TestStepResult> {
-  if (!resolvedRequest.value) {
-    throw new Error('请先在「API 配置」页填写 API 配置并选择 model')
-  }
-  const requestConfig = resolvedRequest.value
   if (!systemPromptText.trim()) {
     throw new Error(`${promptTypeLabel(type)} 的 System Prompt 未加载`)
   }
@@ -270,14 +285,22 @@ async function executeTestStep(
   }
 }
 
+function initialBatchRunGroupId(): number | undefined {
+  if (!selectedRpHistoryKey.value || !rpHistoryDetail.value) {
+    return undefined
+  }
+  return rpHistoryDetail.value.run_group_id
+}
+
 async function saveStepResult(
   type: PromptType,
   parsed: Record<string, unknown>,
-  requestConfig: NonNullable<typeof resolvedRequest.value>,
-) {
+  requestConfig: ResolvedRuntimeRequest,
+  runGroupId?: number,
+): Promise<PromptTestResultDetail | null> {
   const conv = selectedConversation.value
-  if (!conv) return
-  await savePromptTestResult({
+  if (!conv) return null
+  return savePromptTestResult({
     user_id: conv.user_id,
     role_id: conv.role_id,
     app_name: conv.app_name,
@@ -290,6 +313,7 @@ async function saveStepResult(
     model: requestConfig.model,
     top_k: requestConfig.top_k ?? null,
     temperature: requestConfig.temperature,
+    ...(runGroupId != null ? { run_group_id: runGroupId } : {}),
   })
 }
 
@@ -306,7 +330,35 @@ function rpHistoryOptionLabel(row: RpHistorySummary): string {
   ]
     .filter(Boolean)
     .join('')
-  return `${row.role_name} · ${row.round_start}-${row.round_end}轮${flags ? ` · ${flags}` : ''}`
+  const time = row.latest_updated_at ? formatHistoryTime(row.latest_updated_at) : ''
+  return [
+    row.role_name,
+    `${row.round_start}-${row.round_end}轮`,
+    row.prompt_version ? `SP:${row.prompt_version}` : null,
+    flags || null,
+    row.model_count > 0 ? `${row.model_count}模型` : null,
+    time || null,
+  ]
+    .filter(Boolean)
+    .join(' · ')
+}
+
+function compressForModel(model: string): Record<string, unknown> | undefined {
+  if (!selectedRpHistoryKey.value || !rpHistoryDetail.value) return undefined
+  const run = rpHistoryDetail.value.model_runs?.find((item) => item.model === model)
+  return run?.compress ?? undefined
+}
+
+function pickRunMetaForPromptType(
+  detail: RpHistoryDetail,
+  type: PromptType,
+): RpHistoryRunMeta | null | undefined {
+  const runs = detail.model_runs ?? []
+  for (const run of runs) {
+    if (type === 'history_merge' && run.merge_run) return run.merge_run
+    if (type === 'segment_compress' && run.compress_run) return run.compress_run
+  }
+  return runs[0]?.compress_run ?? runs[0]?.merge_run
 }
 
 function applyRunMeta(run: RpHistoryRunMeta | null | undefined) {
@@ -321,6 +373,7 @@ function applyRunMeta(run: RpHistoryRunMeta | null | undefined) {
       if (profile.models.includes(run.model)) {
         runtime.value.apiProfileId = profile.id
         runtime.value.modelName = run.model
+        runtime.value.modelNames = [run.model]
         persistRuntime()
         break
       }
@@ -363,12 +416,11 @@ async function executeRun(options: ExecuteRunOptions) {
     return
   }
 
-  if (!resolvedRequest.value) {
-    ElMessage.error('请先在「API 配置」页填写 API 配置并选择 model')
+  const models = selectedModelNames.value
+  if (models.length === 0) {
+    ElMessage.error('请至少选择一个模型')
     return
   }
-
-  const requestConfig = resolvedRequest.value
 
   running.value = true
   lastResponse.value = null
@@ -376,23 +428,10 @@ async function executeRun(options: ExecuteRunOptions) {
   reasoningContent.value = ''
   reasoningExpanded.value = []
   stepResults.value = []
+  modelRunBundles.value = []
 
   try {
     const type = mode
-    let parsed: Record<string, unknown>
-    const historyCompress =
-      selectedRpHistoryKey.value && rpHistoryDetail.value?.compress
-        ? rpHistoryDetail.value.compress
-        : undefined
-
-    try {
-      parsed = await buildUserPayload(type, {
-        compressExpected: options.mergeCompressExpected ?? historyCompress,
-      })
-    } catch (error) {
-      ElMessage.error(error instanceof Error ? error.message : '构建测试输入失败')
-      return
-    }
 
     let systemText = systemPrompt.value
     if (type === 'history_merge') {
@@ -404,24 +443,86 @@ async function executeRun(options: ExecuteRunOptions) {
       return
     }
 
-    const step = await executeTestStep(type, parsed, systemText)
-    stepResults.value = [step]
-    applyStepToDisplay(step)
-
-    if (step.response.status === 200) {
-      const parsedResult = parseModelJson(step.rawContent)
-      if (parsedResult) {
+    const settled = await Promise.allSettled(
+      models.map(async (model) => {
+        let parsed: Record<string, unknown>
         try {
-          await saveStepResult(type, parsedResult, requestConfig)
-          ElMessage.success('请求成功，已保存历史 RP 效果')
-        } catch {
-          ElMessage.warning('请求成功，但保存历史 RP 效果失败')
+          parsed = await buildUserPayload(type, {
+            compressExpected:
+              options.mergeCompressExpected ?? compressForModel(model),
+          })
+        } catch (error) {
+          throw error instanceof Error ? error : new Error('构建测试输入失败')
         }
-      } else {
-        ElMessage.success('请求成功')
+        const requestConfig = resolveRequestWithModelFallback(model)
+        if (!requestConfig) {
+          throw new Error(`模型 ${model} 配置无效`)
+        }
+        const step = await executeTestStep(type, parsed, systemText, requestConfig)
+        return { model, step, requestConfig }
+      }),
+    )
+
+    const bundles: ModelRunBundle[] = []
+    let successCount = 0
+    let savedCount = 0
+    let batchRunGroupId = initialBatchRunGroupId()
+
+    for (let i = 0; i < settled.length; i++) {
+      const outcome = settled[i]
+      const model = models[i]
+      if (outcome.status === 'rejected') {
+        bundles.push({
+          model,
+          steps: [],
+          error: outcome.reason instanceof Error ? outcome.reason.message : '请求失败',
+        })
+        continue
+      }
+      const { step, requestConfig } = outcome.value
+      bundles.push({ model, steps: [step] })
+      if (step.response.status !== 200) continue
+      successCount += 1
+      const parsedResult = parseModelJson(step.rawContent)
+      if (!parsedResult) continue
+      try {
+        const saved = await saveStepResult(type, parsedResult, requestConfig, batchRunGroupId)
+        if (saved?.run_group_id != null && batchRunGroupId == null) {
+          batchRunGroupId = saved.run_group_id
+        }
+        savedCount += 1
+      } catch {
+        /* 单条保存失败，继续其余模型 */
+      }
+    }
+
+    modelRunBundles.value = bundles
+    const firstOk = bundles.find((b) => b.steps.length > 0)
+    if (firstOk?.steps[0]) {
+      stepResults.value = firstOk.steps
+      applyStepToDisplay(firstOk.steps[0])
+    }
+
+    if (models.length === 1) {
+      const b = bundles[0]
+      if (b?.error) {
+        ElMessage.error(b.error)
+      } else if (b?.steps[0]?.response.status === 200) {
+        ElMessage.success(savedCount > 0 ? '请求成功，已保存历史 RP 效果' : '请求成功')
+      } else if (b?.steps[0]) {
+        ElMessage.error(`请求失败: HTTP ${b.steps[0].response.status}`)
       }
     } else {
-      ElMessage.error(`请求失败: HTTP ${step.response.status}`)
+      ElMessage.info(
+        `并行完成 ${models.length} 个模型：成功 ${successCount}，已保存 ${savedCount}`,
+      )
+    }
+
+    if (savedCount > 0) {
+      await loadRpHistoryOptions()
+      if (selectedRpHistoryKey.value) {
+        await syncRpHistorySelection(selectedRpHistoryKey.value)
+      }
     }
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '请求异常')
@@ -435,21 +536,24 @@ async function runTest() {
     await syncRpHistorySelection(selectedRpHistoryKey.value)
   }
 
-  if (
-    selectedRpHistoryKey.value &&
-    promptType.value === 'history_merge' &&
-    !rpHistoryDetail.value?.compress
-  ) {
-    try {
-      await getPromptTestResultByConversation({
-        user_id: selectedConversation.value!.user_id,
-        role_id: selectedConversation.value!.role_id,
-        app_name: selectedConversation.value!.app_name,
-        prompt_type: 'segment_compress',
-      })
-    } catch {
-      ElMessage.error('该历史无 Compress 结果，无法运行 Merge，请先重跑 Compress')
-      return
+  if (promptType.value === 'history_merge') {
+    const hasCompressFromHistory = Boolean(rpHistoryDetail.value?.compress)
+    if (!hasCompressFromHistory) {
+      try {
+        await getPromptTestResultByConversation({
+          user_id: selectedConversation.value!.user_id,
+          role_id: selectedConversation.value!.role_id,
+          app_name: selectedConversation.value!.app_name,
+          prompt_type: 'segment_compress',
+        })
+      } catch {
+        ElMessage.error(
+          selectedRpHistoryKey.value
+            ? '所选历史无 Compress，无法 Merge'
+            : '尚无 Compress 结果，请先运行 Segment 压缩',
+        )
+        return
+      }
     }
   }
   await executeRun({ mode: promptType.value })
@@ -467,14 +571,11 @@ async function syncRpHistorySelection(key: string) {
       user_id: summary.user_id,
       role_id: summary.role_id,
       app_name: summary.app_name,
+      run_group_id: summary.run_group_id,
     })
     rpHistoryDetail.value = detail
     await applyRpHistoryContext(detail)
-    const runMeta =
-      promptType.value === 'history_merge'
-        ? detail.merge_run ?? detail.compress_run
-        : detail.compress_run ?? detail.merge_run
-    applyRunMeta(runMeta)
+    applyRunMeta(pickRunMetaForPromptType(detail, promptType.value))
     await loadSystemPrompt()
   } catch (error) {
     rpHistoryDetail.value = null
@@ -497,12 +598,7 @@ watch([version, promptType, lang], async () => {
 watch(promptType, () => {
   stepResults.value = []
   if (!selectedRpHistoryKey.value || !rpHistoryDetail.value) return
-  const detail = rpHistoryDetail.value
-  const runMeta =
-    promptType.value === 'history_merge'
-      ? detail.merge_run ?? detail.compress_run
-      : detail.compress_run ?? detail.merge_run
-  applyRunMeta(runMeta)
+  applyRunMeta(pickRunMetaForPromptType(rpHistoryDetail.value, promptType.value))
   void loadSystemPrompt()
 })
 
@@ -549,7 +645,7 @@ async function loadVersionOptions() {
           <template #header>
             <div class="panel-header">
               <span class="panel-title">Prompt 与输入</span>
-              <ApiRuntimePicker scope="test" />
+              <ApiRuntimePicker scope="test" multi-select />
             </div>
           </template>
 
@@ -605,7 +701,7 @@ async function loadVersionOptions() {
                 </el-select>
                 <el-select
                   v-model="selectedRpHistoryKey"
-                  placeholder="若需重跑某段RP历史，可点击选择；反之则不选"
+                  placeholder="重跑/补 Merge 时选择历史；不选则每次新增一条记录"
                   clearable
                   filterable
                   class="rp-history-select"
@@ -614,9 +710,9 @@ async function loadVersionOptions() {
                 >
                   <el-option
                     v-for="item in rpHistoryOptions"
-                    :key="item.conversation_key"
+                    :key="item.history_key"
                     :label="rpHistoryOptionLabel(item)"
-                    :value="item.conversation_key"
+                    :value="item.history_key"
                   />
                 </el-select>
               </div>
@@ -685,7 +781,33 @@ async function loadVersionOptions() {
           </template>
 
           <div class="run-result-body">
-          <template v-if="stepResults.length > 1">
+          <template v-if="modelRunBundles.length > 1">
+            <div
+              v-for="(bundle, index) in modelRunBundles"
+              :key="bundle.model"
+              class="model-run-block"
+            >
+              <h4 class="step-title">模型 · {{ bundle.model }}</h4>
+              <p v-if="bundle.error" class="model-run-error">{{ bundle.error }}</p>
+              <template v-else-if="bundle.steps[0]">
+                <div class="usage">
+                  <el-tag>HTTP {{ bundle.steps[0].response.status }}</el-tag>
+                  <span v-if="bundle.steps[0].response.usage">
+                    prompt: {{ bundle.steps[0].response.usage.prompt_tokens ?? 'N/A' }} |
+                    completion: {{ bundle.steps[0].response.usage.completion_tokens ?? 'N/A' }} |
+                    total: {{ bundle.steps[0].response.usage.total_tokens ?? 'N/A' }}
+                  </span>
+                </div>
+                <ResultPanel
+                  v-if="bundle.steps[0].rawContent"
+                  :content="bundle.steps[0].rawContent"
+                  :prompt-type="bundle.steps[0].promptType"
+                />
+              </template>
+              <el-divider v-if="index < modelRunBundles.length - 1" />
+            </div>
+          </template>
+          <template v-else-if="stepResults.length > 1">
             <div v-for="(step, index) in stepResults" :key="step.promptType" class="step-block">
               <h4 class="step-title">{{ promptTypeLabel(step.promptType) }}</h4>
               <div class="usage">
@@ -726,7 +848,7 @@ async function loadVersionOptions() {
             <ResultPanel v-if="rawContent" :content="rawContent" :prompt-type="promptType" />
           </template>
           <el-empty
-            v-if="!lastResponse && stepResults.length === 0"
+            v-if="!lastResponse && stepResults.length === 0 && modelRunBundles.length === 0"
             description="运行测试后在此查看结果"
             :image-size="72"
           />
@@ -968,6 +1090,16 @@ async function loadVersionOptions() {
   font-size: 15px;
   font-weight: 600;
   color: #303133;
+}
+
+.model-run-block {
+  margin-bottom: 8px;
+}
+
+.model-run-error {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: #f56c6c;
 }
 
 .reasoning-collapse {

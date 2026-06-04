@@ -27,9 +27,32 @@ class RpEvalSaveRequest(BaseModel):
     model: str = ""
     top_k: Optional[int] = None
     temperature: float = 0.0
+    eval_mode: str = "single"
+    evaluated_models: list[str] = Field(default_factory=list)
 
 
 def _extract_overall(eval_result: dict[str, Any]) -> tuple[int, float]:
+    mode = str(eval_result.get("eval_mode", "single"))
+    model_scores = eval_result.get("model_scores")
+    if mode == "multi_compare" and isinstance(model_scores, list) and model_scores:
+        scores: list[int] = []
+        confs: list[float] = []
+        for item in model_scores:
+            if not isinstance(item, dict):
+                continue
+            try:
+                scores.append(max(0, min(100, int(item.get("overall_score", 0)))))
+            except (TypeError, ValueError):
+                scores.append(0)
+            try:
+                confs.append(max(0.0, min(1.0, float(item.get("overall_confidence", 0.0)))))
+            except (TypeError, ValueError):
+                confs.append(0.0)
+        if scores:
+            avg_score = round(sum(scores) / len(scores))
+            avg_conf = sum(confs) / len(confs) if confs else 0.0
+            return avg_score, avg_conf
+
     score_raw = eval_result.get("overall_score", 0)
     conf_raw = eval_result.get("overall_confidence", 0.0)
     try:
@@ -45,7 +68,39 @@ def _extract_overall(eval_result: dict[str, Any]) -> tuple[int, float]:
     return score, conf
 
 
+def _normalize_eval_mode(body: RpEvalSaveRequest, eval_result: dict[str, Any]) -> str:
+    mode = (body.eval_mode or str(eval_result.get("eval_mode", ""))).strip()
+    if mode == "multi_compare":
+        return "multi_compare"
+    models = body.evaluated_models or []
+    if len(models) > 1:
+        return "multi_compare"
+    if isinstance(eval_result.get("model_scores"), list) and len(eval_result["model_scores"]) > 1:
+        return "multi_compare"
+    return "single"
+
+
+def _normalize_evaluated_models(body: RpEvalSaveRequest, eval_result: dict[str, Any]) -> list[str]:
+    if body.evaluated_models:
+        return [str(m).strip() for m in body.evaluated_models if str(m).strip()]
+    model_scores = eval_result.get("model_scores")
+    if isinstance(model_scores, list):
+        names = []
+        for item in model_scores:
+            if isinstance(item, dict) and item.get("model"):
+                names.append(str(item["model"]).strip())
+        if names:
+            return names
+    return []
+
+
 def _row_to_summary(row: RpEvalResult) -> dict[str, Any]:
+    try:
+        evaluated_models = json.loads(row.evaluated_models or "[]")
+        if not isinstance(evaluated_models, list):
+            evaluated_models = []
+    except json.JSONDecodeError:
+        evaluated_models = []
     return {
         "id": row.id,
         "user_id": row.user_id,
@@ -59,6 +114,8 @@ def _row_to_summary(row: RpEvalResult) -> dict[str, Any]:
         "compress_prompt_version": row.compress_prompt_version or "",
         "merge_prompt_version": row.merge_prompt_version or "",
         "model": row.model or "",
+        "eval_mode": getattr(row, "eval_mode", None) or "single",
+        "evaluated_models": evaluated_models,
         "overall_score": row.overall_score,
         "overall_confidence": row.overall_confidence,
         "created_at": row.created_at.isoformat() if row.created_at else None,
@@ -80,6 +137,8 @@ def create_rp_eval(db: Session, body: RpEvalSaveRequest) -> dict[str, Any]:
     if not body.eval_result:
         raise HTTPException(status_code=400, detail="eval_result is required")
     overall_score, overall_confidence = _extract_overall(body.eval_result)
+    eval_mode = _normalize_eval_mode(body, body.eval_result)
+    evaluated_models = _normalize_evaluated_models(body, body.eval_result)
     row = RpEvalResult(
         user_id=body.user_id.strip(),
         role_id=body.role_id.strip(),
@@ -99,6 +158,8 @@ def create_rp_eval(db: Session, body: RpEvalSaveRequest) -> dict[str, Any]:
         temperature=body.temperature,
         overall_score=overall_score,
         overall_confidence=overall_confidence,
+        eval_mode=eval_mode,
+        evaluated_models=json.dumps(evaluated_models, ensure_ascii=False),
     )
     db.add(row)
     db.commit()

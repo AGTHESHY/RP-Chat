@@ -376,6 +376,8 @@ def api_get_rp_history_detail(
     user_id: str = Query(...),
     role_id: str = Query(...),
     app_name: str = Query(default=""),
+    run_group_id: Optional[int] = Query(default=None),
+    model: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     return get_rp_history_detail(
@@ -383,6 +385,8 @@ def api_get_rp_history_detail(
         user_id=user_id,
         role_id=role_id,
         app_name=app_name,
+        run_group_id=run_group_id,
+        model=model,
     )
 
 
@@ -409,6 +413,8 @@ def api_get_prompt_test_result_by_conversation(
     role_id: str = Query(...),
     app_name: str = Query(default=""),
     prompt_type: str = Query(...),
+    model: Optional[str] = Query(default=None),
+    run_group_id: Optional[int] = Query(default=None),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     return get_prompt_test_result_for_conversation(
@@ -417,6 +423,8 @@ def api_get_prompt_test_result_by_conversation(
         role_id=role_id,
         app_name=app_name,
         prompt_type=prompt_type,
+        model=model,
+        run_group_id=run_group_id,
     )
 
 
