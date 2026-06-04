@@ -1,0 +1,29 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: rp-chat-mysql
+    restart: unless-stopped
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: rp_chat
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - rp_chat_mysql_data:/var/lib/mysql
+
+  redis:
+    image: redis:7-alpine
+    container_name: rp-chat-redis
+    restart: unless-stopped
+    ports:
+      - "6380:6379"
+    volumes:
+      - rp_chat_redis_data:/data
+
+volumes:
+  rp_chat_mysql_data:
+  rp_chat_redis_data:

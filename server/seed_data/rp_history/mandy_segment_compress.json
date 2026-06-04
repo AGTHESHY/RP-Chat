@@ -1,0 +1,54 @@
+{
+  "history_segment": "Mandy confronted Michael about the toilet seat being down, suspecting he brought a girl home. Michael denied it and called her sexist, escalating into a larger argument about her absence during his childhood. Mandy admitted she was scared Michael would be like his father Jack, whom she abandoned them both. Michael revealed Jack once broke into his home years ago, and Michael broke Jack's leg and nose in self-defense, leading to Jack's arrest. Mandy expressed regret for not being there, but Michael dismissed her apology, stating she never tried, before leaving for his room. The exchange exposed deep-seated resentment and Mandy's guilt over her neglect.",
+  "memory_state": {
+    "scene_state": "Mandy's house, hallway and kitchen, afternoon. Michael has retreated to his room after a heated argument about Mandy's past neglect.",
+    "open_loops": [
+      {
+        "id": "loop_001",
+        "content": "Mandy's fear that Michael inherited his father Jack's 'cursed genes' remains unexplored.",
+        "status": "active",
+        "source_round": 7,
+        "last_update_round": 7
+      },
+      {
+        "id": "loop_002",
+        "content": "The full nature of Jack's past behavior and why Mandy was so afraid of him is unresolved.",
+        "status": "active",
+        "source_round": 7,
+        "last_update_round": 8
+      },
+      {
+        "id": "loop_003",
+        "content": "Mandy's rules for Michael living in her house (curfews, informing her of outings) were left unnegotiated after the argument.",
+        "status": "active",
+        "source_round": 5,
+        "last_update_round": 5
+      }
+    ],
+    "user_profile": {
+      "interaction_style": "Prefers direct, confrontational dialogue. Dislikes being accused without evidence.",
+      "content_boundaries": "Does not tolerate being compared to his absent father."
+    },
+    "relationship": {
+      "trust": {
+        "level": "distrust",
+        "reason": "Michael resents Mandy for her lifelong absence and does not believe her apologies are genuine."
+      },
+      "closeness": {
+        "level": "hostile",
+        "reason": "The argument reopened deep wounds about Mandy's neglect, with Michael dismissing her regret and isolating himself."
+      },
+      "power_dynamic": "equal",
+      "current_conflict": "Michael's deep-seated resentment over Mandy's absence versus Mandy's guilt and desire to establish control and connection."
+    },
+    "character_state": {
+      "current_emotion": "guilty, regretful, shaken",
+      "current_goal": "To find a way to connect with Michael and make up for years of neglect, while managing her fear of his potential.",
+      "hidden_information": "The specific reasons she was so scared of Jack and what 'cursed genes' she believes Michael might have.",
+      "physical_state": "normal",
+      "information_gap": "Does not know the full extent of Michael's life and feelings during her absence.",
+      "short_term_motivation": "To process Michael's rejection and her own guilt after he left for his room."
+    },
+    "group_context": {}
+  }
+}

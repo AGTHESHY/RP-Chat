@@ -1,0 +1,571 @@
+import { buildQuery } from './query'
+
+export type BaselineVersion = 'v1' | 'v2'
+export type PromptVersion = BaselineVersion | string
+export type PromptType = 'segment_compress' | 'history_merge'
+export type PromptLang = 'zh' | 'en'
+
+export interface VersionInfo {
+  version: string
+  base_version: string
+  status: string
+  created_at?: string | null
+}
+
+export interface VersionsListResponse {
+  baselines: string[]
+  custom: VersionInfo[]
+  drafts: VersionInfo[]
+}
+
+export interface VersionMetaResponse {
+  version: string
+  base_version: string
+  is_baseline: boolean
+  status: string
+  is_draft: boolean
+  has_en?: boolean
+}
+
+export interface PromptContentResponse {
+  version?: string
+  prompt_type?: string
+  lang?: string
+  content_sfw: string
+  content_nsfw: string
+  content: string
+  readonly?: boolean
+}
+
+export interface DocResponse {
+  version: string
+  filename: string
+  content: string
+  readonly?: boolean
+}
+
+export interface DraftUpdatePayload {
+  prompt_type?: string
+  lang?: string
+  content_sfw?: string
+  content_nsfw?: string
+  doc_content?: string
+}
+
+export interface PromptTestResultSummary {
+  id: number
+  user_id: string
+  role_id: string
+  app_name: string
+  role_name: string
+  prompt_type: PromptType
+  round_start: number
+  round_end: number
+  prompt_version: string
+  model: string
+  top_k: number | null
+  temperature: number
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface PromptTestResultDetail extends PromptTestResultSummary {
+  expected_result: Record<string, unknown>
+}
+
+export function listPromptTestResults(params?: {
+  user_id?: string
+  role_id?: string
+  role_name?: string
+  prompt_type?: string
+}) {
+  return request<PromptTestResultSummary[]>(
+    `/api/prompt-test-results${buildQuery(params ?? {})}`,
+  )
+}
+
+export function getPromptTestResult(id: number) {
+  return request<PromptTestResultDetail>(`/api/prompt-test-results/${id}`)
+}
+
+export function getPromptTestResultByConversation(params: {
+  user_id: string
+  role_id: string
+  app_name: string
+  prompt_type: PromptType
+}) {
+  const search = new URLSearchParams()
+  search.set('user_id', params.user_id)
+  search.set('role_id', params.role_id)
+  search.set('app_name', params.app_name)
+  search.set('prompt_type', params.prompt_type)
+  return request<PromptTestResultDetail>(
+    `/api/prompt-test-results/by-conversation?${search.toString()}`,
+  )
+}
+
+export function savePromptTestResult(body: {
+  user_id: string
+  role_id: string
+  app_name: string
+  role_name: string
+  prompt_type: PromptType
+  expected_result: Record<string, unknown>
+  round_start: number
+  round_end: number
+  prompt_version: string
+  model: string
+  top_k: number | null
+  temperature: number
+}) {
+  return request<PromptTestResultDetail>('/api/prompt-test-results', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+export interface RpHistorySummary {
+  conversation_key: string
+  user_id: string
+  role_id: string
+  app_name: string
+  role_name: string
+  has_compress: boolean
+  has_merge: boolean
+  round_start: number
+  round_end: number
+  latest_updated_at: string | null
+}
+
+export interface RpHistoryRunMeta {
+  prompt_version: string
+  model: string
+  top_k: number | null
+  temperature: number
+  updated_at: string | null
+}
+
+export interface RpHistoryDetail {
+  conversation_key: string
+  user_id: string
+  role_id: string
+  app_name: string
+  role_name: string
+  round_start: number
+  round_end: number
+  compress: Record<string, unknown> | null
+  merge: Record<string, unknown> | null
+  compress_updated_at: string | null
+  merge_updated_at: string | null
+  compress_run: RpHistoryRunMeta | null
+  merge_run: RpHistoryRunMeta | null
+}
+
+export function listRpHistory(params?: {
+  user_id?: string
+  role_id?: string
+  role_name?: string
+}) {
+  return request<RpHistorySummary[]>(`/api/rp-history${buildQuery(params ?? {})}`)
+}
+
+export function getRpHistoryDetail(params: {
+  user_id: string
+  role_id: string
+  app_name: string
+}) {
+  const search = new URLSearchParams()
+  search.set('user_id', params.user_id)
+  search.set('role_id', params.role_id)
+  search.set('app_name', params.app_name)
+  return request<RpHistoryDetail>(`/api/rp-history/detail?${search.toString()}`)
+}
+
+export interface ChatCompletionRequest {
+  base_url: string
+  api_key: string
+  model: string
+  temperature: number
+  top_k: number | null
+  system_prompt: string
+  user_content: string
+  /** 与 API 配置页「额外请求体参数」合并进上游请求 */
+  extra_body?: Record<string, unknown>
+}
+
+export interface ChatCompletionResponse {
+  status: number
+  raw_content?: string
+  reasoning_content?: string
+  usage?: Record<string, number>
+  finish_reason?: string
+  error?: string
+  raw_text?: string
+}
+
+export interface TranslateRequest {
+  base_url: string
+  api_key: string
+  model: string
+  temperature: number
+}
+
+export const NSFW_MARKER = '{{NSFW}}'
+export const NSFW_PART_SEP = '\n---NSFW_PART---\n'
+
+export function composePrompt(
+  contentSfw: string,
+  contentNsfw: string,
+  includeNsfw: boolean,
+): string {
+  const collapseBlankLines = (text: string) => text.replace(/\n{3,}/g, '\n\n').trim()
+
+  if (!includeNsfw || !contentNsfw.trim()) {
+    return collapseBlankLines(contentSfw.replace(/\n*{{NSFW}}\n*/g, '\n'))
+  }
+
+  let result = contentSfw
+  for (const part of contentNsfw.split(NSFW_PART_SEP)) {
+    const trimmed = part.trim()
+    if (!trimmed) continue
+    result = result.replace(NSFW_MARKER, trimmed)
+  }
+  return collapseBlankLines(result.replace(/\n*{{NSFW}}\n*/g, '\n'))
+}
+
+async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  const resp = await fetch(url, init)
+  if (!resp.ok) {
+    const text = await resp.text()
+    throw new Error(text || `Request failed: ${resp.status}`)
+  }
+  return resp.json() as Promise<T>
+}
+
+export function listVersions() {
+  return request<VersionsListResponse>('/api/versions')
+}
+
+export function createVersion(version: string, baseVersion?: string | null) {
+  return request<VersionMetaResponse>('/api/versions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      version,
+      base_version: baseVersion || null,
+    }),
+  })
+}
+
+export function getVersionMeta(version: string) {
+  return request<VersionMetaResponse>(`/api/versions/${encodeURIComponent(version)}`)
+}
+
+export function getVersionPrompt(
+  version: string,
+  promptType: PromptType,
+  lang: PromptLang,
+  includeNsfw = true,
+) {
+  const params = includeNsfw ? '' : '?include_nsfw=false'
+  return request<PromptContentResponse>(
+    `/api/versions/${encodeURIComponent(version)}/prompts/${promptType}/${lang}${params}`,
+  )
+}
+
+export function getVersionDoc(version: string) {
+  return request<DocResponse>(`/api/versions/${encodeURIComponent(version)}/docs`)
+}
+
+export function saveDraft(version: string, payload: DraftUpdatePayload) {
+  return request<{ ok: boolean; version: string; updated_at: string }>(
+    `/api/versions/${encodeURIComponent(version)}/draft`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  )
+}
+
+export function commitVersion(version: string) {
+  return request<{ ok: boolean; version: string; status: string }>(
+    `/api/versions/${encodeURIComponent(version)}/commit`,
+    { method: 'POST' },
+  )
+}
+
+export function translateVersion(version: string, body: TranslateRequest) {
+  return request<{ ok: boolean; version: string; translated: string[] }>(
+    `/api/versions/${encodeURIComponent(version)}/translate`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  )
+}
+
+export function discardDraft(version: string) {
+  return request<{ ok: boolean; version: string }>(
+    `/api/versions/${encodeURIComponent(version)}/draft`,
+    { method: 'DELETE' },
+  )
+}
+
+export function deleteVersion(version: string) {
+  return request<{ ok: boolean; deleted: string[] }>(
+    `/api/versions/${encodeURIComponent(version)}`,
+    { method: 'DELETE' },
+  )
+}
+
+export function runChatCompletion(body: ChatCompletionRequest) {
+  return request<ChatCompletionResponse>('/api/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+export type JailbreakContentMode = 'plain' | 'variable'
+export type JailbreakVariableGroup = 'nsfw' | 'general' | 'custom'
+
+export interface JailbreakVariableModule {
+  id: string
+  key: string
+  label: string
+  body: string
+  enabled: boolean
+  group: JailbreakVariableGroup
+  order: number
+}
+
+export interface JailbreakBaseSection {
+  id: string
+  name: string
+  content: string
+  alwaysOn: boolean
+  order: number
+}
+
+export interface JailbreakModulesDoc {
+  baseSections: JailbreakBaseSection[]
+  variables: JailbreakVariableModule[]
+}
+
+export interface JailbreakRecord {
+  id: number
+  scheme_name: string
+  version: string
+  target_model: string
+  content: string
+  content_mode: JailbreakContentMode
+  modules_json: JailbreakModulesDoc | null
+  changelog: string
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface JailbreakSchemeSummary {
+  scheme_name: string
+  version_count: number
+  latest_version: string
+  latest_id: number
+  target_model: string
+  updated_at: string | null
+}
+
+export interface JailbreakCreatePayload {
+  scheme_name: string
+  target_model: string
+  content: string
+  changelog?: string
+  version?: string
+  content_mode?: JailbreakContentMode
+  modules_json?: JailbreakModulesDoc | null
+}
+
+export interface JailbreakUpdatePayload {
+  target_model?: string
+  content?: string
+  changelog?: string
+  content_mode?: JailbreakContentMode
+  modules_json?: JailbreakModulesDoc | null
+}
+
+export function listJailbreaks(params?: { scheme_name?: string; target_model?: string }) {
+  return request<JailbreakRecord[]>(`/api/jailbreaks${buildQuery(params ?? {})}`)
+}
+
+export function listJailbreakSchemes() {
+  return request<JailbreakSchemeSummary[]>('/api/jailbreaks/schemes')
+}
+
+export function getJailbreak(id: number) {
+  return request<JailbreakRecord>(`/api/jailbreaks/${id}`)
+}
+
+export function createJailbreak(payload: JailbreakCreatePayload) {
+  return request<JailbreakRecord>('/api/jailbreaks', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export function updateJailbreak(id: number, payload: JailbreakUpdatePayload) {
+  return request<JailbreakRecord>(`/api/jailbreaks/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export function deleteJailbreak(id: number) {
+  return request<{ ok: boolean; deleted: JailbreakRecord }>(`/api/jailbreaks/${id}`, {
+    method: 'DELETE',
+  })
+}
+
+export function forkJailbreakNextVersion(id: number) {
+  return request<JailbreakRecord>(`/api/jailbreaks/${id}/next-version`, {
+    method: 'POST',
+  })
+}
+
+export interface ChatQaCase {
+  id: number
+  user_id: string
+  role_id: string
+  role_name: string
+  app_name: string
+  question: string
+  answer: string
+  status: string
+  u_time: number
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface ChatQaConversationSummary {
+  conversation_key: string
+  user_id: string
+  role_id: string
+  role_name: string
+  app_name: string
+  message_count: number
+  latest_u_time: number
+}
+
+export interface ChatQaConversationDetail {
+  conversation_key: string
+  user_id: string
+  role_id: string
+  role_name: string
+  app_name: string
+  message_count: number
+  messages: ChatQaCase[]
+}
+
+export function listChatQaCases(params?: {
+  user_id?: string
+  role_id?: string
+  role_name?: string
+}) {
+  return request<ChatQaCase[]>(`/api/chat-qa-cases${buildQuery(params ?? {})}`)
+}
+
+export function listChatQaConversations(params?: {
+  user_id?: string
+  role_id?: string
+  role_name?: string
+}) {
+  return request<ChatQaConversationSummary[]>(
+    `/api/chat-qa-conversations${buildQuery(params ?? {})}`,
+  )
+}
+
+export function getChatQaConversation(params: {
+  user_id: string
+  role_id: string
+  app_name: string
+}) {
+  const search = new URLSearchParams()
+  search.set('user_id', params.user_id)
+  search.set('role_id', params.role_id)
+  search.set('app_name', params.app_name)
+  return request<ChatQaConversationDetail>(
+    `/api/chat-qa-conversations/messages?${search.toString()}`,
+  )
+}
+
+export function getChatQaCase(id: number) {
+  return request<ChatQaCase>(`/api/chat-qa-cases/${id}`)
+}
+
+export interface RpEvalSummary {
+  id: number
+  user_id: string
+  role_id: string
+  app_name: string
+  role_name: string
+  round_start: number
+  round_end: number
+  has_compress: boolean
+  has_merge: boolean
+  model: string
+  overall_score: number
+  overall_confidence: number
+  created_at: string | null
+}
+
+export interface RpEvalDetail extends RpEvalSummary {
+  eval_system_prompt: string
+  eval_result: Record<string, unknown>
+  raw_model_output: string
+  top_k: number | null
+  temperature: number
+}
+
+export interface RpEvalSavePayload {
+  user_id: string
+  role_id: string
+  app_name: string
+  role_name: string
+  round_start: number
+  round_end: number
+  has_compress: boolean
+  has_merge: boolean
+  eval_system_prompt: string
+  eval_result: Record<string, unknown>
+  raw_model_output: string
+  model: string
+  top_k: number | null
+  temperature: number
+}
+
+export function listRpEvaluations(params: {
+  user_id: string
+  role_id: string
+  app_name: string
+}) {
+  const search = new URLSearchParams()
+  search.set('user_id', params.user_id)
+  search.set('role_id', params.role_id)
+  search.set('app_name', params.app_name)
+  return request<RpEvalSummary[]>(`/api/rp-evaluations?${search.toString()}`)
+}
+
+export function getRpEval(id: number) {
+  return request<RpEvalDetail>(`/api/rp-evaluations/${id}`)
+}
+
+export function saveRpEval(body: RpEvalSavePayload) {
+  return request<RpEvalDetail>('/api/rp-evaluations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
