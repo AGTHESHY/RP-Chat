@@ -20,6 +20,7 @@ import AppPanel from '../components/layout/AppPanel.vue'
 import FilterBar from '../components/layout/FilterBar.vue'
 import RuntimeParamsFields from '../components/RuntimeParamsFields.vue'
 import { formatConfidence, formatHistoryTime } from '../utils/format'
+import { formatEvalPromptVersions } from '../utils/rpEvalFormat'
 import { usePageRuntime } from '../composables/usePageRuntime'
 import { buildRpEvalUserContent } from '../utils/rpEvalPayload'
 import { parseRpEvalJson, type RpEvalParsed } from '../utils/parseRpEvalJson'
@@ -60,17 +61,6 @@ const canRunEval = computed(() => {
 
 function rpHistoryFlags(row: RpHistorySummary): string {
   return [row.has_compress ? 'C' : '', row.has_merge ? 'M' : ''].filter(Boolean).join('') || '—'
-}
-
-function formatEvalPromptVersions(row: RpEvalSummary): string {
-  const parts: string[] = []
-  if (row.has_compress && row.compress_prompt_version) {
-    parts.push(`C:${row.compress_prompt_version}`)
-  }
-  if (row.has_merge && row.merge_prompt_version) {
-    parts.push(`M:${row.merge_prompt_version}`)
-  }
-  return parts.join(' ') || '—'
 }
 
 const selectedEvalSummary = computed(

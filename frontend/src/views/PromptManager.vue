@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   commitVersion,
@@ -34,6 +35,7 @@ import {
 } from '../utils/translateConfigStorage'
 import { normalizeBaseUrl } from '../utils/apiConfigStorage'
 
+const route = useRoute()
 const baselineTab = ref<'v1' | 'v2'>('v2')
 const activeVersion = ref('v2')
 const versionNodes = ref<{ version: string; base_version: string; status?: string }[]>([])
@@ -412,6 +414,16 @@ function clearTranslateStorage() {
 
 onMounted(async () => {
   await refreshVersionList()
+  const queryVersion = typeof route.query.version === 'string' ? route.query.version.trim() : ''
+  if (queryVersion) {
+    activeVersion.value = queryVersion
+    const root = rootBaselineForVersion(versionNodes.value, queryVersion)
+    if (root === 'v1' || root === 'v2') {
+      baselineTab.value = root
+    } else if (queryVersion === 'v1' || queryVersion === 'v2') {
+      baselineTab.value = queryVersion
+    }
+  }
   await loadVersionData()
 })
 </script>

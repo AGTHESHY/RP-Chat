@@ -28,6 +28,7 @@ function navigate(path: string) {
         <el-menu-item index="/jailbreak">破限管理</el-menu-item>
         <el-menu-item index="/test">RP 测试</el-menu-item>
         <el-menu-item index="/rp-eval">RP 测评</el-menu-item>
+        <el-menu-item index="/smart-brain">智脑</el-menu-item>
         <el-menu-item index="/api-config">API 配置</el-menu-item>
       </el-menu>
     </el-header>

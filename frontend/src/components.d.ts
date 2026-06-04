@@ -14,6 +14,7 @@ declare module 'vue' {
     AdaptiveTabs: typeof import('./components/AdaptiveTabs.vue')['default']
     ApiRuntimePicker: typeof import('./components/ApiRuntimePicker.vue')['default']
     AppPanel: typeof import('./components/layout/AppPanel.vue')['default']
+    BrainResultView: typeof import('./components/BrainResultView.vue')['default']
     ChatQaBubble: typeof import('./components/ChatQaBubble.vue')['default']
     ElAlert: typeof import('element-plus/es')['ElAlert']
     ElButton: typeof import('element-plus/es')['ElButton']

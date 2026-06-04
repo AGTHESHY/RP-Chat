@@ -19,6 +19,11 @@ const router = createRouter({
       component: () => import('../views/RpEvalPage.vue'),
     },
     {
+      path: '/smart-brain',
+      name: 'smart-brain',
+      component: () => import('../views/SmartBrainPage.vue'),
+    },
+    {
       path: '/api-config',
       name: 'api-config',
       component: () => import('../views/ApiConfigPage.vue'),

@@ -11,6 +11,7 @@ export const RUNTIME_STORAGE_KEYS = {
   test: 'rp-chat-runtime-test',
   eval: 'rp-chat-runtime-eval',
   jailbreak: 'rp-chat-runtime-jailbreak',
+  brain: 'rp-chat-runtime-brain',
 } as const
 
 export type RuntimeScope = keyof typeof RUNTIME_STORAGE_KEYS
