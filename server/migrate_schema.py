@@ -363,3 +363,40 @@ def migrate_rp_eval_schema(db: Session) -> None:
         if alters:
             with engine.begin() as conn:
                 conn.execute(text(f"ALTER TABLE rp_eval_results {', '.join(alters)}"))
+
+
+def migrate_brain_schema(db: Session) -> None:
+    inspector = inspect(engine)
+    tables = inspector.get_table_names()
+
+    if "brain_analysis_results" not in tables:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE brain_analysis_results (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        rp_eval_id INT NOT NULL,
+                        user_id VARCHAR(32) NOT NULL,
+                        role_id VARCHAR(32) NOT NULL,
+                        app_name VARCHAR(128) NOT NULL DEFAULT '',
+                        role_name VARCHAR(128) NOT NULL DEFAULT '',
+                        round_start INT NOT NULL DEFAULT 1,
+                        round_end INT NOT NULL DEFAULT 10,
+                        compress_prompt_version VARCHAR(64) NOT NULL DEFAULT '',
+                        merge_prompt_version VARCHAR(64) NOT NULL DEFAULT '',
+                        overall VARCHAR(16) NOT NULL DEFAULT 'hold',
+                        brain_system_prompt LONGTEXT NOT NULL,
+                        brain_result LONGTEXT NOT NULL,
+                        raw_model_output LONGTEXT NOT NULL,
+                        model VARCHAR(128) NOT NULL DEFAULT '',
+                        top_k INT NULL,
+                        temperature DOUBLE NOT NULL DEFAULT 0,
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        INDEX idx_brain_conv (user_id, role_id, app_name),
+                        INDEX idx_brain_rp_eval (rp_eval_id),
+                        INDEX idx_brain_created (created_at)
+                    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+                    """
+                )
+            )

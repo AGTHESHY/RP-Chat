@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   getChatQaConversation,
   getRpEval,
@@ -8,6 +8,7 @@ import {
   listRpEvaluations,
   listRpHistory,
   runChatCompletion,
+  deleteRpEval,
   saveRpEval,
   type RpEvalSummary,
   type RpHistoryDetail,
@@ -259,6 +260,21 @@ function onEvalRowClick(row: RpEvalSummary) {
   void selectEvalRow(row)
 }
 
+async function removeEvalRecord() {
+  if (!selectedEvalId.value) return
+  try {
+    await ElMessageBox.confirm('确定删除该条测评记录？', '删除测评', { type: 'warning' })
+    await deleteRpEval(selectedEvalId.value)
+    selectedEvalId.value = null
+    currentRaw.value = ''
+    currentParsed.value = null
+    await loadEvalHistory()
+    ElMessage.success('已删除测评记录')
+  } catch {
+    /* cancelled */
+  }
+}
+
 onMounted(async () => {
   syncWithRegistry()
   await loadRpHistoryList()
@@ -308,7 +324,18 @@ onMounted(async () => {
             暂无历史，请先在 RP 测试页运行测试
           </p>
 
-          <div class="sub-panel-title">测评历史</div>
+          <div class="sub-panel-title sub-panel-title-row">
+            <span>测评历史</span>
+            <el-button
+              size="small"
+              type="danger"
+              plain
+              :disabled="!selectedEvalId"
+              @click="removeEvalRecord"
+            >
+              删除
+            </el-button>
+          </div>
           <el-table
             v-loading="evalHistoryLoading"
             :data="evalHistory"

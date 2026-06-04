@@ -18,12 +18,21 @@ from migrate_schema import (
     migrate_prompt_sfw_nsfw,
     migrate_prompt_test_result_schema,
     migrate_prompt_whitespace,
+    migrate_brain_schema,
     migrate_rp_eval_schema,
     migrate_version_schema,
+)
+from brain_service import (
+    BrainSaveRequest,
+    create_brain_analysis,
+    delete_brain_analysis,
+    get_brain_analysis,
+    list_brain_analyses,
 )
 from rp_eval_service import (
     RpEvalSaveRequest,
     create_rp_eval,
+    delete_rp_eval,
     get_rp_eval,
     list_rp_evaluations,
 )
@@ -80,6 +89,7 @@ async def lifespan(app: FastAPI):
         migrate_chat_qa_schema(db)
         migrate_prompt_test_result_schema(db)
         migrate_rp_eval_schema(db)
+        migrate_brain_schema(db)
         bootstrap_seed_data(db)
     finally:
         db.close()
@@ -451,6 +461,44 @@ def api_create_rp_evaluation(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     return create_rp_eval(db, body)
+
+
+@app.delete("/api/rp-evaluations/{record_id}")
+def api_delete_rp_evaluation(record_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    return delete_rp_eval(db, record_id)
+
+
+@app.get("/api/brain-analyses")
+def api_list_brain_analyses(
+    user_id: str = Query(...),
+    role_id: str = Query(...),
+    app_name: str = Query(default=""),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    return list_brain_analyses(
+        db,
+        user_id=user_id,
+        role_id=role_id,
+        app_name=app_name,
+    )
+
+
+@app.get("/api/brain-analyses/{record_id}")
+def api_get_brain_analysis(record_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    return get_brain_analysis(db, record_id)
+
+
+@app.post("/api/brain-analyses")
+def api_create_brain_analysis(
+    body: BrainSaveRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return create_brain_analysis(db, body)
+
+
+@app.delete("/api/brain-analyses/{record_id}")
+def api_delete_brain_analysis(record_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    return delete_brain_analysis(db, record_id)
 
 
 @app.post("/api/chat/completions")

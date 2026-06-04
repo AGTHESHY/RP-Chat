@@ -131,3 +131,13 @@ def get_rp_eval(db: Session, record_id: int) -> dict[str, Any]:
     if not row:
         raise HTTPException(status_code=404, detail="RP evaluation not found")
     return _row_to_detail(row)
+
+
+def delete_rp_eval(db: Session, record_id: int) -> dict[str, Any]:
+    row = db.query(RpEvalResult).filter(RpEvalResult.id == record_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="RP evaluation not found")
+    data = _row_to_detail(row)
+    db.delete(row)
+    db.commit()
+    return {"ok": True, "deleted": data}

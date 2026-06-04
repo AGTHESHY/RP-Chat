@@ -1,4 +1,4 @@
-import type { RpEvalSummary } from '../api'
+import type { BrainAnalysisSummary, RpEvalSummary } from '../api'
 
 export function formatEvalPromptVersions(row: RpEvalSummary): string {
   const parts: string[] = []
@@ -6,6 +6,17 @@ export function formatEvalPromptVersions(row: RpEvalSummary): string {
     parts.push(`C:${row.compress_prompt_version}`)
   }
   if (row.has_merge && row.merge_prompt_version) {
+    parts.push(`M:${row.merge_prompt_version}`)
+  }
+  return parts.join(' ') || '—'
+}
+
+export function formatBrainPromptVersions(row: BrainAnalysisSummary): string {
+  const parts: string[] = []
+  if (row.compress_prompt_version) {
+    parts.push(`C:${row.compress_prompt_version}`)
+  }
+  if (row.merge_prompt_version) {
     parts.push(`M:${row.merge_prompt_version}`)
   }
   return parts.join(' ') || '—'

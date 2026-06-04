@@ -573,3 +573,84 @@ export function saveRpEval(body: RpEvalSavePayload) {
     body: JSON.stringify(body),
   })
 }
+
+export function deleteRpEval(id: number) {
+  return request<{ ok: boolean; deleted: RpEvalDetail }>(`/api/rp-evaluations/${id}`, {
+    method: 'DELETE',
+  })
+}
+
+export type BrainRecommendation = 'minor' | 'major' | 'hold'
+
+export interface BrainAnalysisSummary {
+  id: number
+  rp_eval_id: number
+  user_id: string
+  role_id: string
+  app_name: string
+  role_name: string
+  round_start: number
+  round_end: number
+  compress_prompt_version: string
+  merge_prompt_version: string
+  overall: BrainRecommendation
+  model: string
+  created_at: string | null
+}
+
+export interface BrainAnalysisDetail extends BrainAnalysisSummary {
+  brain_system_prompt: string
+  brain_result: Record<string, unknown>
+  raw_model_output: string
+  top_k: number | null
+  temperature: number
+}
+
+export interface BrainSavePayload {
+  rp_eval_id: number
+  user_id: string
+  role_id: string
+  app_name: string
+  role_name: string
+  round_start: number
+  round_end: number
+  compress_prompt_version?: string
+  merge_prompt_version?: string
+  brain_system_prompt: string
+  brain_result: Record<string, unknown>
+  raw_model_output: string
+  model: string
+  top_k: number | null
+  temperature: number
+}
+
+export function listBrainAnalyses(params: {
+  user_id: string
+  role_id: string
+  app_name: string
+}) {
+  const search = new URLSearchParams()
+  search.set('user_id', params.user_id)
+  search.set('role_id', params.role_id)
+  search.set('app_name', params.app_name)
+  return request<BrainAnalysisSummary[]>(`/api/brain-analyses?${search.toString()}`)
+}
+
+export function getBrainAnalysis(id: number) {
+  return request<BrainAnalysisDetail>(`/api/brain-analyses/${id}`)
+}
+
+export function saveBrainAnalysis(body: BrainSavePayload) {
+  return request<BrainAnalysisDetail>('/api/brain-analyses', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+export function deleteBrainAnalysis(id: number) {
+  return request<{ ok: boolean; deleted: BrainAnalysisDetail }>(
+    `/api/brain-analyses/${id}`,
+    { method: 'DELETE' },
+  )
+}

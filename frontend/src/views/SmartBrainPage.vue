@@ -1,13 +1,19 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
+  deleteBrainAnalysis,
+  deleteRpEval,
+  getBrainAnalysis,
   getRpEval,
   getRpHistoryDetail,
+  listBrainAnalyses,
   listRpEvaluations,
   listRpHistory,
   listVersions,
   runChatCompletion,
+  saveBrainAnalysis,
+  type BrainAnalysisSummary,
   type RpEvalDetail,
   type RpEvalSummary,
   type RpHistoryDetail,
@@ -27,8 +33,12 @@ import {
   resetBrainSystemPrompt,
   saveBrainSystemPrompt,
 } from '../utils/brainPromptStorage'
-import { parseBrainJson, type BrainParsed } from '../utils/parseBrainJson'
-import { formatEvalPromptVersions } from '../utils/rpEvalFormat'
+import {
+  brainRecommendationLabel,
+  parseBrainJson,
+  type BrainParsed,
+} from '../utils/parseBrainJson'
+import { formatBrainPromptVersions, formatEvalPromptVersions } from '../utils/rpEvalFormat'
 import { formatConfidence, formatHistoryTime } from '../utils/format'
 
 const brainRuntime = usePageRuntime('brain')
@@ -42,15 +52,26 @@ const rpHistoryDetail = ref<RpHistoryDetail | null>(null)
 
 const brainSystemPrompt = ref(loadBrainSystemPrompt())
 const analyzing = ref(false)
+const historyTab = ref<'eval' | 'brain'>('eval')
 const evalHistory = ref<RpEvalSummary[]>([])
 const evalHistoryLoading = ref(false)
 const selectedEvalId = ref<number | null>(null)
 const selectedEvalDetail = ref<RpEvalDetail | null>(null)
+
+const brainHistory = ref<BrainAnalysisSummary[]>([])
+const brainHistoryLoading = ref(false)
+const selectedBrainId = ref<number | null>(null)
+
 const currentRaw = ref('')
 const currentParsed = ref<BrainParsed | null>(null)
+const viewingBrainRecord = ref(false)
 
 const selectedEvalSummary = computed(
   () => evalHistory.value.find((item) => item.id === selectedEvalId.value) ?? null,
+)
+
+const selectedBrainSummary = computed(
+  () => brainHistory.value.find((item) => item.id === selectedBrainId.value) ?? null,
 )
 
 const canRunBrain = computed(
@@ -68,10 +89,19 @@ watch(brainSystemPrompt, (text) => {
 watch(selectedRpHistoryKey, () => {
   selectedEvalId.value = null
   selectedEvalDetail.value = null
+  selectedBrainId.value = null
   currentRaw.value = ''
   currentParsed.value = null
+  viewingBrainRecord.value = false
   void syncRpHistorySelection(selectedRpHistoryKey.value)
   void loadEvalHistory()
+  void loadBrainHistory()
+})
+
+watch(historyTab, () => {
+  if (historyTab.value === 'eval') {
+    viewingBrainRecord.value = false
+  }
 })
 
 async function loadRpHistoryList() {
@@ -148,13 +178,37 @@ async function loadEvalHistory() {
   }
 }
 
+async function loadBrainHistory() {
+  if (!rpHistoryDetail.value) {
+    brainHistory.value = []
+    return
+  }
+  const detail = rpHistoryDetail.value
+  brainHistoryLoading.value = true
+  try {
+    brainHistory.value = await listBrainAnalyses({
+      user_id: detail.user_id,
+      role_id: detail.role_id,
+      app_name: detail.app_name,
+    })
+  } catch (error) {
+    brainHistory.value = []
+    ElMessage.error(error instanceof Error ? error.message : '加载智脑历史失败')
+  } finally {
+    brainHistoryLoading.value = false
+  }
+}
+
 function handleResetPrompt() {
   brainSystemPrompt.value = resetBrainSystemPrompt()
   ElMessage.success('已恢复默认智脑 SP')
 }
 
 async function selectEvalRow(row: RpEvalSummary) {
+  historyTab.value = 'eval'
   selectedEvalId.value = row.id
+  selectedBrainId.value = null
+  viewingBrainRecord.value = false
   currentRaw.value = ''
   currentParsed.value = null
   try {
@@ -167,6 +221,62 @@ async function selectEvalRow(row: RpEvalSummary) {
 
 function onEvalRowClick(row: RpEvalSummary) {
   void selectEvalRow(row)
+}
+
+async function selectBrainRow(row: BrainAnalysisSummary) {
+  historyTab.value = 'brain'
+  selectedBrainId.value = row.id
+  viewingBrainRecord.value = true
+  try {
+    const detail = await getBrainAnalysis(row.id)
+    currentRaw.value = detail.raw_model_output
+    const parsed = parseBrainJson(JSON.stringify(detail.brain_result))
+    currentParsed.value = parsed.ok ? parsed.data ?? null : null
+    if (evalHistory.value.some((e) => e.id === detail.rp_eval_id)) {
+      selectedEvalId.value = detail.rp_eval_id
+      selectedEvalDetail.value = await getRpEval(detail.rp_eval_id)
+    }
+  } catch (error) {
+    currentParsed.value = null
+    ElMessage.error(error instanceof Error ? error.message : '加载智脑记录失败')
+  }
+}
+
+function onBrainRowClick(row: BrainAnalysisSummary) {
+  void selectBrainRow(row)
+}
+
+async function removeEvalRecord() {
+  if (!selectedEvalId.value) return
+  try {
+    await ElMessageBox.confirm('确定删除该条测评记录？', '删除测评', { type: 'warning' })
+    await deleteRpEval(selectedEvalId.value)
+    selectedEvalId.value = null
+    selectedEvalDetail.value = null
+    viewingBrainRecord.value = false
+    currentRaw.value = ''
+    currentParsed.value = null
+    await loadEvalHistory()
+    ElMessage.success('已删除测评记录')
+  } catch {
+    /* cancelled */
+  }
+}
+
+async function removeBrainRecord() {
+  if (!selectedBrainId.value) return
+  try {
+    await ElMessageBox.confirm('确定删除该条智脑分析记录？', '删除智脑', { type: 'warning' })
+    await deleteBrainAnalysis(selectedBrainId.value)
+    selectedBrainId.value = null
+    viewingBrainRecord.value = false
+    currentRaw.value = ''
+    currentParsed.value = null
+    await loadBrainHistory()
+    ElMessage.success('已删除智脑记录')
+  } catch {
+    /* cancelled */
+  }
 }
 
 async function handleRunBrain() {
@@ -218,7 +328,30 @@ async function handleRunBrain() {
       return
     }
     currentParsed.value = parsed.data
-    ElMessage.success('智脑分析完成')
+    viewingBrainRecord.value = false
+
+    const saved = await saveBrainAnalysis({
+      rp_eval_id: evalDetail.id,
+      user_id: evalDetail.user_id,
+      role_id: evalDetail.role_id,
+      app_name: evalDetail.app_name,
+      role_name: evalDetail.role_name,
+      round_start: evalDetail.round_start,
+      round_end: evalDetail.round_end,
+      compress_prompt_version: evalDetail.compress_prompt_version,
+      merge_prompt_version: evalDetail.merge_prompt_version,
+      brain_system_prompt: brainSystemPrompt.value,
+      brain_result: JSON.parse(JSON.stringify(parsed.data)) as Record<string, unknown>,
+      raw_model_output: raw,
+      model: requestConfig.model,
+      top_k: requestConfig.top_k ?? null,
+      temperature: requestConfig.temperature,
+    })
+
+    await loadBrainHistory()
+    selectedBrainId.value = saved.id
+    historyTab.value = 'brain'
+    ElMessage.success('智脑分析完成并已保存')
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '智脑分析失败')
   } finally {
@@ -275,33 +408,82 @@ onMounted(async () => {
           暂无历史，请先在 RP 测试页运行测试
         </p>
 
-        <div class="sub-panel-title">测评历史</div>
-        <el-table
-          v-loading="evalHistoryLoading"
-          :data="evalHistory"
-          highlight-current-row
-          class="eval-table"
-          size="small"
-          empty-text="暂无测评"
-          @row-click="onEvalRowClick"
-        >
-          <el-table-column label="时间" min-width="80">
-            <template #default="{ row }">
-              {{ formatHistoryTime(row.created_at) }}
-            </template>
-          </el-table-column>
-          <el-table-column label="SP版本" min-width="80" show-overflow-tooltip>
-            <template #default="{ row }">
-              {{ formatEvalPromptVersions(row as RpEvalSummary) }}
-            </template>
-          </el-table-column>
-          <el-table-column label="分" width="36" prop="overall_score" />
-          <el-table-column label="置信" width="48">
-            <template #default="{ row }">
-              {{ formatConfidence(row.overall_confidence) }}
-            </template>
-          </el-table-column>
-        </el-table>
+        <el-tabs v-model="historyTab" class="history-tabs" stretch>
+          <el-tab-pane label="测评历史" name="eval">
+            <div class="sub-panel-title sub-panel-title-row tab-pane-toolbar">
+              <span />
+              <el-button
+                size="small"
+                type="danger"
+                plain
+                :disabled="!selectedEvalId || historyTab !== 'eval'"
+                @click="removeEvalRecord"
+              >
+                删除
+              </el-button>
+            </div>
+            <el-table
+              v-loading="evalHistoryLoading"
+              :data="evalHistory"
+              highlight-current-row
+              class="eval-table"
+              size="small"
+              empty-text="暂无测评"
+              @row-click="onEvalRowClick"
+            >
+              <el-table-column label="时间" min-width="72">
+                <template #default="{ row }">
+                  {{ formatHistoryTime(row.created_at) }}
+                </template>
+              </el-table-column>
+              <el-table-column label="SP版本" min-width="72" show-overflow-tooltip>
+                <template #default="{ row }">
+                  {{ formatEvalPromptVersions(row as RpEvalSummary) }}
+                </template>
+              </el-table-column>
+              <el-table-column label="分" width="32" prop="overall_score" />
+            </el-table>
+          </el-tab-pane>
+          <el-tab-pane label="智脑历史" name="brain">
+            <div class="sub-panel-title sub-panel-title-row tab-pane-toolbar">
+              <span />
+              <el-button
+                size="small"
+                type="danger"
+                plain
+                :disabled="!selectedBrainId || historyTab !== 'brain'"
+                @click="removeBrainRecord"
+              >
+                删除
+              </el-button>
+            </div>
+            <el-table
+              v-loading="brainHistoryLoading"
+              :data="brainHistory"
+              highlight-current-row
+              class="eval-table"
+              size="small"
+              empty-text="暂无智脑记录"
+              @row-click="onBrainRowClick"
+            >
+              <el-table-column label="时间" min-width="72">
+                <template #default="{ row }">
+                  {{ formatHistoryTime(row.created_at) }}
+                </template>
+              </el-table-column>
+              <el-table-column label="SP版本" min-width="72" show-overflow-tooltip>
+                <template #default="{ row }">
+                  {{ formatBrainPromptVersions(row as BrainAnalysisSummary) }}
+                </template>
+              </el-table-column>
+              <el-table-column label="建议" min-width="64">
+                <template #default="{ row }">
+                  {{ brainRecommendationLabel(row.overall) }}
+                </template>
+              </el-table-column>
+            </el-table>
+          </el-tab-pane>
+        </el-tabs>
       </AppPanel>
     </template>
 
@@ -310,29 +492,50 @@ onMounted(async () => {
         <template #actions>
           <el-button size="small" @click="handleResetPrompt">恢复默认</el-button>
         </template>
-        <el-empty v-if="!selectedEvalId" description="请选择一条测评历史" />
-        <el-form v-else label-width="88px" class="edit-form">
-          <el-form-item label="角色">
-            <el-input :model-value="selectedEvalDetail?.role_name ?? '—'" disabled />
-          </el-form-item>
-          <el-form-item label="被测 SP">
-            <el-input
-              :model-value="
-                selectedEvalSummary ? formatEvalPromptVersions(selectedEvalSummary) : '—'
-              "
-              disabled
-            />
-          </el-form-item>
-          <el-form-item label="测评分">
-            <el-input
-              :model-value="
-                selectedEvalSummary
-                  ? `${selectedEvalSummary.overall_score} / 置信 ${formatConfidence(selectedEvalSummary.overall_confidence)}`
-                  : '—'
-              "
-              disabled
-            />
-          </el-form-item>
+        <el-empty
+          v-if="!selectedEvalId && !selectedBrainSummary"
+          description="请选择测评或智脑历史"
+        />
+        <el-form
+          v-else
+          label-width="88px"
+          class="edit-form"
+        >
+            <el-form-item label="角色">
+              <el-input
+                :model-value="
+                  selectedEvalDetail?.role_name ?? selectedBrainSummary?.role_name ?? '—'
+                "
+                disabled
+              />
+            </el-form-item>
+            <el-form-item v-if="selectedBrainSummary" label="关联测评">
+              <el-input :model-value="`#${selectedBrainSummary.rp_eval_id}`" disabled />
+            </el-form-item>
+            <el-form-item label="被测 SP">
+              <el-input
+                :model-value="
+                  selectedEvalSummary
+                    ? formatEvalPromptVersions(selectedEvalSummary)
+                    : selectedBrainSummary
+                      ? formatBrainPromptVersions(selectedBrainSummary)
+                      : '—'
+                "
+                disabled
+              />
+            </el-form-item>
+            <el-form-item v-if="selectedEvalSummary" label="测评分">
+              <el-input
+                :model-value="`${selectedEvalSummary.overall_score} / 置信 ${formatConfidence(selectedEvalSummary.overall_confidence)}`"
+                disabled
+              />
+            </el-form-item>
+            <el-form-item v-if="selectedBrainSummary && historyTab === 'brain'" label="智脑建议">
+              <el-input
+                :model-value="brainRecommendationLabel(selectedBrainSummary.overall)"
+                disabled
+              />
+            </el-form-item>
           <el-form-item label="智脑 SP" class="content-item">
             <el-input
               v-model="brainSystemPrompt"
@@ -372,7 +575,13 @@ onMounted(async () => {
           </el-form>
 
           <div v-if="currentParsed" class="result-block">
-            <div class="result-title">版本更迭建议</div>
+            <div class="result-title">
+              {{
+                viewingBrainRecord && selectedBrainId
+                  ? `智脑记录 #${selectedBrainId}`
+                  : '版本更迭建议'
+              }}
+            </div>
             <el-scrollbar class="result-scroll">
               <BrainResultView :parsed="currentParsed" />
             </el-scrollbar>
@@ -386,7 +595,7 @@ onMounted(async () => {
           <el-empty
             v-else
             class="result-empty"
-            description="选择测评历史后点击「开始分析」"
+            description="在「测评历史」选记录后分析，或在「智脑历史」查看已保存建议"
             :image-size="56"
           />
         </div>
@@ -435,5 +644,10 @@ onMounted(async () => {
 .result-empty {
   flex: 1;
   padding: 12px;
+}
+
+.tab-pane-toolbar {
+  border-top: none;
+  min-height: 36px;
 }
 </style>

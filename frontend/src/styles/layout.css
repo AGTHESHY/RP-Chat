@@ -96,6 +96,29 @@
   flex-shrink: 0;
 }
 
+.sub-panel-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 8px;
+}
+
+.history-tabs {
+  flex-shrink: 0;
+}
+
+.history-tabs :deep(.el-tabs__header) {
+  margin: 0;
+  padding: 0 12px;
+  border-top: 1px solid #ebeef5;
+  background: #fafafa;
+}
+
+.history-tabs :deep(.el-tabs__content) {
+  padding: 0;
+}
+
 .eval-table {
   flex-shrink: 0;
   max-height: 200px;
