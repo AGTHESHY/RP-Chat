@@ -330,6 +330,8 @@ def migrate_rp_eval_schema(db: Session) -> None:
                         round_end INT NOT NULL DEFAULT 10,
                         has_compress TINYINT(1) NOT NULL DEFAULT 0,
                         has_merge TINYINT(1) NOT NULL DEFAULT 0,
+                        compress_prompt_version VARCHAR(64) NOT NULL DEFAULT '',
+                        merge_prompt_version VARCHAR(64) NOT NULL DEFAULT '',
                         eval_system_prompt LONGTEXT NOT NULL,
                         eval_result LONGTEXT NOT NULL,
                         raw_model_output LONGTEXT NOT NULL,
@@ -345,3 +347,19 @@ def migrate_rp_eval_schema(db: Session) -> None:
                     """
                 )
             )
+    else:
+        columns = {column["name"] for column in inspector.get_columns("rp_eval_results")}
+        alters: list[str] = []
+        if "compress_prompt_version" not in columns:
+            alters.append(
+                "ADD COLUMN compress_prompt_version VARCHAR(64) NOT NULL DEFAULT '' "
+                "AFTER has_merge"
+            )
+        if "merge_prompt_version" not in columns:
+            alters.append(
+                "ADD COLUMN merge_prompt_version VARCHAR(64) NOT NULL DEFAULT '' "
+                "AFTER compress_prompt_version"
+            )
+        if alters:
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE rp_eval_results {', '.join(alters)}"))

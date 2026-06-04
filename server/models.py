@@ -131,6 +131,8 @@ class RpEvalResult(Base):
     round_end: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     has_compress: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     has_merge: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    compress_prompt_version: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    merge_prompt_version: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     eval_system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
     eval_result: Mapped[str] = mapped_column(Text, nullable=False)
     raw_model_output: Mapped[str] = mapped_column(Text, nullable=False, default="")

@@ -62,6 +62,21 @@ function rpHistoryFlags(row: RpHistorySummary): string {
   return [row.has_compress ? 'C' : '', row.has_merge ? 'M' : ''].filter(Boolean).join('') || '—'
 }
 
+function formatEvalPromptVersions(row: RpEvalSummary): string {
+  const parts: string[] = []
+  if (row.has_compress && row.compress_prompt_version) {
+    parts.push(`C:${row.compress_prompt_version}`)
+  }
+  if (row.has_merge && row.merge_prompt_version) {
+    parts.push(`M:${row.merge_prompt_version}`)
+  }
+  return parts.join(' ') || '—'
+}
+
+const selectedEvalSummary = computed(
+  () => evalHistory.value.find((item) => item.id === selectedEvalId.value) ?? null,
+)
+
 watch(evalSystemPrompt, (text) => {
   saveRpEvalSystemPrompt(text)
 })
@@ -218,6 +233,8 @@ async function handleRunEval() {
       round_end: detail.round_end,
       has_compress: Boolean(detail.compress),
       has_merge: Boolean(detail.merge),
+      compress_prompt_version: detail.compress_run?.prompt_version ?? '',
+      merge_prompt_version: detail.merge_run?.prompt_version ?? '',
       eval_system_prompt: evalSystemPrompt.value,
       eval_result: JSON.parse(JSON.stringify(parsed.data)) as Record<string, unknown>,
       raw_model_output: raw,
@@ -311,12 +328,17 @@ onMounted(async () => {
             empty-text="暂无测评"
             @row-click="onEvalRowClick"
           >
-            <el-table-column label="时间" min-width="100">
+            <el-table-column label="时间" min-width="88">
               <template #default="{ row }">
                 {{ formatHistoryTime(row.created_at) }}
               </template>
             </el-table-column>
-            <el-table-column label="分" width="44" prop="overall_score" />
+            <el-table-column label="SP版本" min-width="88" show-overflow-tooltip>
+              <template #default="{ row }">
+                {{ formatEvalPromptVersions(row as RpEvalSummary) }}
+              </template>
+            </el-table-column>
+            <el-table-column label="分" width="40" prop="overall_score" />
             <el-table-column label="置信" width="52">
               <template #default="{ row }">
                 {{ formatConfidence(row.overall_confidence) }}
@@ -341,6 +363,25 @@ onMounted(async () => {
                 :model-value="
                   rpHistoryDetail
                     ? `${rpHistoryDetail.round_start} - ${rpHistoryDetail.round_end}`
+                    : '—'
+                "
+                disabled
+              />
+            </el-form-item>
+            <el-form-item label="被测 SP">
+              <el-input
+                :model-value="
+                  rpHistoryDetail
+                    ? [
+                        rpHistoryDetail.compress_run?.prompt_version
+                          ? `Compress: ${rpHistoryDetail.compress_run.prompt_version}`
+                          : '',
+                        rpHistoryDetail.merge_run?.prompt_version
+                          ? `Merge: ${rpHistoryDetail.merge_run.prompt_version}`
+                          : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' · ') || '—'
                     : '—'
                 "
                 disabled
@@ -389,7 +430,43 @@ onMounted(async () => {
 
           <div v-if="currentRaw || currentParsed" class="result-block">
             <div class="result-title">
-              {{ selectedEvalId ? `测评结果 #${selectedEvalId}` : '本次测评结果' }}
+              <span>{{
+                selectedEvalId ? `测评结果 #${selectedEvalId}` : '本次测评结果'
+              }}</span>
+              <span
+                v-if="
+                  (selectedEvalSummary &&
+                    formatEvalPromptVersions(selectedEvalSummary) !== '—') ||
+                  (!selectedEvalId &&
+                    rpHistoryDetail &&
+                    [
+                      rpHistoryDetail.compress_run?.prompt_version
+                        ? `C:${rpHistoryDetail.compress_run.prompt_version}`
+                        : '',
+                      rpHistoryDetail.merge_run?.prompt_version
+                        ? `M:${rpHistoryDetail.merge_run.prompt_version}`
+                        : '',
+                    ]
+                      .filter(Boolean)
+                      .join(' '))
+                "
+                class="result-prompt-versions"
+              >
+                {{
+                  selectedEvalSummary
+                    ? formatEvalPromptVersions(selectedEvalSummary)
+                    : [
+                        rpHistoryDetail?.compress_run?.prompt_version
+                          ? `C:${rpHistoryDetail.compress_run.prompt_version}`
+                          : '',
+                        rpHistoryDetail?.merge_run?.prompt_version
+                          ? `M:${rpHistoryDetail.merge_run.prompt_version}`
+                          : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' ')
+                }}
+              </span>
             </div>
             <el-scrollbar class="result-scroll">
               <RpEvalResultView :raw-content="currentRaw" :parsed="currentParsed" />
@@ -438,8 +515,18 @@ onMounted(async () => {
 }
 
 .result-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
   font-size: 13px;
   font-weight: 600;
+}
+
+.result-prompt-versions {
+  font-size: 12px;
+  font-weight: 500;
+  color: #909399;
 }
 
 .result-scroll {

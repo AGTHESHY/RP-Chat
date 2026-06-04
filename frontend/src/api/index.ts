@@ -515,6 +515,8 @@ export interface RpEvalSummary {
   round_end: number
   has_compress: boolean
   has_merge: boolean
+  compress_prompt_version: string
+  merge_prompt_version: string
   model: string
   overall_score: number
   overall_confidence: number
@@ -538,6 +540,8 @@ export interface RpEvalSavePayload {
   round_end: number
   has_compress: boolean
   has_merge: boolean
+  compress_prompt_version?: string
+  merge_prompt_version?: string
   eval_system_prompt: string
   eval_result: Record<string, unknown>
   raw_model_output: string

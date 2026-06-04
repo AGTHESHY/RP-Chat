@@ -19,6 +19,8 @@ class RpEvalSaveRequest(BaseModel):
     round_end: int = Field(default=10, ge=1)
     has_compress: bool = False
     has_merge: bool = False
+    compress_prompt_version: str = ""
+    merge_prompt_version: str = ""
     eval_system_prompt: str
     eval_result: dict[str, Any]
     raw_model_output: str = ""
@@ -54,6 +56,8 @@ def _row_to_summary(row: RpEvalResult) -> dict[str, Any]:
         "round_end": row.round_end,
         "has_compress": row.has_compress,
         "has_merge": row.has_merge,
+        "compress_prompt_version": row.compress_prompt_version or "",
+        "merge_prompt_version": row.merge_prompt_version or "",
         "model": row.model or "",
         "overall_score": row.overall_score,
         "overall_confidence": row.overall_confidence,
@@ -85,6 +89,8 @@ def create_rp_eval(db: Session, body: RpEvalSaveRequest) -> dict[str, Any]:
         round_end=body.round_end,
         has_compress=body.has_compress,
         has_merge=body.has_merge,
+        compress_prompt_version=(body.compress_prompt_version or "").strip(),
+        merge_prompt_version=(body.merge_prompt_version or "").strip(),
         eval_system_prompt=body.eval_system_prompt,
         eval_result=json.dumps(body.eval_result, ensure_ascii=False),
         raw_model_output=body.raw_model_output or "",
