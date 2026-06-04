@@ -14,3 +14,6 @@ REDIS_DRAFT_TTL_SECONDS = int(os.getenv("REDIS_DRAFT_TTL_SECONDS", str(7 * 24 * 
 
 BASELINE_VERSIONS = frozenset({"v1", "v2"})
 DRAFT_KEY_PREFIX = "rpchat:draft:"
+BRAIN_KEY_PREFIX = "rpchat:brain:"
+# 智脑历史默认 3 天过期；设为 0 则永不过期
+REDIS_BRAIN_TTL_SECONDS = int(os.getenv("REDIS_BRAIN_TTL_SECONDS", str(3 * 24 * 3600)))

@@ -148,33 +148,6 @@ class RpEvalResult(Base):
     )
 
 
-class BrainAnalysisResult(Base):
-    __tablename__ = "brain_analysis_results"
-
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    rp_eval_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    user_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    role_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    app_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
-    role_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
-    round_start: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    round_end: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
-    compress_prompt_version: Mapped[str] = mapped_column(String(64), nullable=False, default="")
-    merge_prompt_version: Mapped[str] = mapped_column(String(64), nullable=False, default="")
-    overall: Mapped[str] = mapped_column(String(16), nullable=False, default="hold")
-    brain_system_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    brain_result: Mapped[str] = mapped_column(Text, nullable=False)
-    raw_model_output: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    model: Mapped[str] = mapped_column(String(128), nullable=False, default="")
-    top_k: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    temperature: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        server_default=func.now(),
-        nullable=False,
-    )
-
-
 class ChatQaCase(Base):
     __tablename__ = "chat_qa_cases"
 

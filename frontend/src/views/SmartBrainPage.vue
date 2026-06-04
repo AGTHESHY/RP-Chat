@@ -28,6 +28,7 @@ import RuntimeParamsFields from '../components/RuntimeParamsFields.vue'
 import { usePageRuntime } from '../composables/usePageRuntime'
 import { DEEPSEEK_JSON_OUTPUT_EXTRA } from '../utils/apiProfileStorage'
 import { buildBrainUserPayload } from '../utils/brainPayload'
+import { validateBrainEvalVersions } from '../utils/brainVersionGuard'
 import {
   loadBrainSystemPrompt,
   resetBrainSystemPrompt,
@@ -297,6 +298,11 @@ async function handleRunBrain() {
 
   try {
     const versionCatalog = await listVersions()
+    const guard = await validateBrainEvalVersions(evalDetail, versionCatalog)
+    if (!guard.ok) {
+      ElMessage.warning(guard.message || '被测版本与基线或其他版本相同，请换用不同版本')
+      return
+    }
     const userContent = await buildBrainUserPayload({ evalDetail, versionCatalog })
     const extra = {
       ...(requestConfig.extra_body ?? {}),
