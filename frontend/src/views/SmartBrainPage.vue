@@ -28,7 +28,10 @@ import FilterBar from '../components/layout/FilterBar.vue'
 import RuntimeParamsFields from '../components/RuntimeParamsFields.vue'
 import { usePageRuntime } from '../composables/usePageRuntime'
 import { DEEPSEEK_JSON_OUTPUT_EXTRA } from '../utils/apiProfileStorage'
-import { computeAdaptiveChatTimeout } from '../utils/chatCompletionTimeout'
+import {
+  computeAdaptiveChatTimeout,
+  computeAdaptiveMaxCompletionTokens,
+} from '../utils/chatCompletionTimeout'
 import { buildBrainUserPayload, hasMultiModelEvalDimensions } from '../utils/brainPayload'
 import {
   buildVersionContext,
@@ -443,6 +446,7 @@ async function handleRunBrain() {
       system_prompt: brainSystemPrompt.value,
       user_content: userContent,
       timeout_seconds: computeAdaptiveChatTimeout(evaluatedModelCount),
+      max_completion_tokens: computeAdaptiveMaxCompletionTokens(evaluatedModelCount),
     })
 
     const raw = resp.raw_content || resp.error || resp.raw_text || ''

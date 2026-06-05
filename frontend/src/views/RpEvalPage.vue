@@ -39,7 +39,11 @@ import {
   parseRpEvalJson,
   type RpEvalParsed,
 } from '../utils/parseRpEvalJson'
-import { computeAdaptiveChatTimeout } from '../utils/chatCompletionTimeout'
+import { DEEPSEEK_JSON_OUTPUT_EXTRA } from '../utils/apiProfileStorage'
+import {
+  computeAdaptiveChatTimeout,
+  computeAdaptiveMaxCompletionTokens,
+} from '../utils/chatCompletionTimeout'
 import {
   loadRpEvalSystemPrompt,
   resetRpEvalSystemPrompt,
@@ -370,23 +374,33 @@ async function handleRunEval() {
       modelRuns,
     })
 
+    const evalExtraBody = {
+      ...(requestConfig.extra_body ?? {}),
+      ...DEEPSEEK_JSON_OUTPUT_EXTRA,
+    }
     const resp = await runChatCompletion({
       base_url: requestConfig.base_url,
       api_key: requestConfig.api_key,
       model: requestConfig.model,
       temperature: requestConfig.temperature,
       top_k: requestConfig.top_k ?? null,
-      extra_body: requestConfig.extra_body,
+      extra_body: evalExtraBody,
       system_prompt: evalSystemPrompt.value,
       user_content: userContent,
       timeout_seconds: computeAdaptiveChatTimeout(modelRuns.length),
+      max_completion_tokens: computeAdaptiveMaxCompletionTokens(modelRuns.length),
     })
 
     const raw = resp.raw_content || resp.error || resp.raw_text || ''
     currentRaw.value = raw
 
     if (resp.status !== 200) {
-      ElMessage.error(`测评请求失败: HTTP ${resp.status}`)
+      const detail = (resp.error || resp.raw_text || '').trim().slice(0, 240)
+      ElMessage.error(
+        detail
+          ? `测评请求失败: HTTP ${resp.status} — ${detail}`
+          : `测评请求失败: HTTP ${resp.status}`,
+      )
       return
     }
 

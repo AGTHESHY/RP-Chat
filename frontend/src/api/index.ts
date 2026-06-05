@@ -231,6 +231,8 @@ export interface ChatCompletionRequest {
   user_content: string
   /** 上游 LLM 请求超时（秒），未传时后端默认 120 */
   timeout_seconds?: number
+  /** 生成 token 上限，未传时后端默认 4096 */
+  max_completion_tokens?: number
   /** 与 API 配置页「额外请求体参数」合并进上游请求 */
   extra_body?: Record<string, unknown>
 }

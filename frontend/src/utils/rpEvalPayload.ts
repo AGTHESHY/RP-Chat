@@ -8,10 +8,33 @@ export interface BuildRpEvalPayloadInput {
   modelRuns: RpHistoryModelRun[]
 }
 
+function slimCompressOutput(
+  raw: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (!raw) return null
+  const slim: Record<string, unknown> = {}
+  if ('history_segment' in raw) slim.history_segment = raw.history_segment
+  if ('memory_state' in raw) slim.memory_state = raw.memory_state
+  return Object.keys(slim).length > 0 ? slim : raw
+}
+
+function slimMergeOutput(raw: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (!raw) return null
+  if ('history_memory' in raw) {
+    return { history_memory: raw.history_memory }
+  }
+  return raw
+}
+
+function serializeEvalPayload(payload: unknown, compact: boolean): string {
+  return compact ? JSON.stringify(payload) : JSON.stringify(payload, null, 2)
+}
+
 export function buildRpEvalUserContent(input: BuildRpEvalPayloadInput): string {
   const { messages, detail, modelRuns } = input
   const slice = messages.slice(detail.round_start - 1, detail.round_end)
   const sourceDialogue = formatConversationRounds(slice, detail.round_start)
+  const compact = modelRuns.length > 1
 
   const meta = {
     user_id: detail.user_id,
@@ -22,6 +45,7 @@ export function buildRpEvalUserContent(input: BuildRpEvalPayloadInput): string {
     round_end: detail.round_end,
     conversation_key: detail.conversation_key,
     prompt_version: detail.prompt_version,
+    model_count: modelRuns.length,
   }
 
   if (modelRuns.length <= 1) {
@@ -29,8 +53,8 @@ export function buildRpEvalUserContent(input: BuildRpEvalPayloadInput): string {
     const payload = {
       meta,
       source_dialogue: sourceDialogue,
-      segment_compress: run?.compress ?? null,
-      history_merge: run?.merge ?? null,
+      segment_compress: slimCompressOutput(run?.compress ?? null),
+      history_merge: slimMergeOutput(run?.merge ?? null),
       run_meta: {
         model: run?.model ?? '',
         compress: formatRunMeta(run?.compress_run ?? null),
@@ -39,7 +63,7 @@ export function buildRpEvalUserContent(input: BuildRpEvalPayloadInput): string {
         merge_updated_at: run?.merge_run?.updated_at ?? null,
       },
     }
-    return JSON.stringify(payload, null, 2)
+    return serializeEvalPayload(payload, compact)
   }
 
   const payload = {
@@ -48,8 +72,8 @@ export function buildRpEvalUserContent(input: BuildRpEvalPayloadInput): string {
     comparison_mode: true,
     model_outputs: modelRuns.map((run) => ({
       model: run.model,
-      segment_compress: run.compress,
-      history_merge: run.merge,
+      segment_compress: slimCompressOutput(run.compress),
+      history_merge: slimMergeOutput(run.merge),
       run_meta: {
         compress: formatRunMeta(run.compress_run),
         merge: formatRunMeta(run.merge_run),
@@ -58,7 +82,7 @@ export function buildRpEvalUserContent(input: BuildRpEvalPayloadInput): string {
       },
     })),
   }
-  return JSON.stringify(payload, null, 2)
+  return serializeEvalPayload(payload, compact)
 }
 
 function formatRunMeta(run: RpHistoryRunMeta | null): Record<string, unknown> | null {

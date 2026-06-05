@@ -155,7 +155,7 @@ class ChatCompletionRequest(BaseModel):
     top_k: Optional[int] = None
     system_prompt: str
     user_content: str
-    max_completion_tokens: int = Field(default=4096, ge=1)
+    max_completion_tokens: Optional[int] = Field(default=None, ge=1)
     timeout_seconds: Optional[float] = None
     extra_body: Optional[dict[str, Any]] = None
 
@@ -164,6 +164,12 @@ def _resolve_chat_timeout(timeout_seconds: Optional[float]) -> float:
     if timeout_seconds is None:
         return 120.0
     return max(30.0, min(600.0, float(timeout_seconds)))
+
+
+def _resolve_max_completion_tokens(max_completion_tokens: Optional[int]) -> int:
+    if max_completion_tokens is None:
+        return 4096
+    return max(1024, min(16384, int(max_completion_tokens)))
 
 
 @app.get("/api/versions")
@@ -519,7 +525,7 @@ async def chat_completions(body: ChatCompletionRequest) -> dict[str, Any]:
             {"role": "user", "content": body.user_content},
         ],
         "stream": False,
-        "max_completion_tokens": body.max_completion_tokens,
+        "max_completion_tokens": _resolve_max_completion_tokens(body.max_completion_tokens),
         "temperature": body.temperature,
     }
     if body.top_k is not None:
@@ -535,22 +541,34 @@ async def chat_completions(body: ChatCompletionRequest) -> dict[str, Any]:
     }
 
     request_timeout = _resolve_chat_timeout(body.timeout_seconds)
+    httpx_timeout = httpx.Timeout(request_timeout, connect=30.0)
     try:
-        async with httpx.AsyncClient(timeout=request_timeout) as client:
+        async with httpx.AsyncClient(timeout=httpx_timeout) as client:
             resp = await client.post(base_url, json=payload, headers=headers)
+    except httpx.TimeoutException as exc:
+        raise HTTPException(
+            status_code=504,
+            detail=f"Upstream timed out after {int(request_timeout)}s: {exc}",
+        ) from exc
     except httpx.RequestError as exc:
         raise HTTPException(status_code=502, detail=f"Request failed: {exc}") from exc
 
     result: dict[str, Any] = {
         "status": resp.status_code,
-        "raw_text": resp.text,
+        "raw_text": resp.text[:8000] if resp.text else "",
     }
 
     if resp.status_code != 200:
-        result["error"] = resp.text[:2000]
+        result["error"] = resp.text[:2000] if resp.text else ""
         return result
 
-    data = resp.json()
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Upstream returned non-JSON body: {resp.text[:500]}",
+        ) from exc
     result["data"] = data
     result["usage"] = data.get("usage", {})
 
