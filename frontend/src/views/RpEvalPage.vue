@@ -39,6 +39,7 @@ import {
   parseRpEvalJson,
   type RpEvalParsed,
 } from '../utils/parseRpEvalJson'
+import { computeAdaptiveChatTimeout } from '../utils/chatCompletionTimeout'
 import {
   loadRpEvalSystemPrompt,
   resetRpEvalSystemPrompt,
@@ -378,6 +379,7 @@ async function handleRunEval() {
       extra_body: requestConfig.extra_body,
       system_prompt: evalSystemPrompt.value,
       user_content: userContent,
+      timeout_seconds: computeAdaptiveChatTimeout(modelRuns.length),
     })
 
     const raw = resp.raw_content || resp.error || resp.raw_text || ''

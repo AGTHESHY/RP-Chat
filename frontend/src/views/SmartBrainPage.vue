@@ -28,6 +28,7 @@ import FilterBar from '../components/layout/FilterBar.vue'
 import RuntimeParamsFields from '../components/RuntimeParamsFields.vue'
 import { usePageRuntime } from '../composables/usePageRuntime'
 import { DEEPSEEK_JSON_OUTPUT_EXTRA } from '../utils/apiProfileStorage'
+import { computeAdaptiveChatTimeout } from '../utils/chatCompletionTimeout'
 import { buildBrainUserPayload, hasMultiModelEvalDimensions } from '../utils/brainPayload'
 import {
   buildVersionContext,
@@ -427,6 +428,11 @@ async function handleRunBrain() {
       ...DEEPSEEK_JSON_OUTPUT_EXTRA,
     }
 
+    const evaluatedModelCount = Math.max(
+      1,
+      evalDetail.evaluated_models?.length ??
+        (evalMode === 'multi_compare' ? 2 : 1),
+    )
     const resp = await runChatCompletion({
       base_url: requestConfig.base_url,
       api_key: requestConfig.api_key,
@@ -436,6 +442,7 @@ async function handleRunBrain() {
       extra_body: extra,
       system_prompt: brainSystemPrompt.value,
       user_content: userContent,
+      timeout_seconds: computeAdaptiveChatTimeout(evaluatedModelCount),
     })
 
     const raw = resp.raw_content || resp.error || resp.raw_text || ''

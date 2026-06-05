@@ -229,6 +229,8 @@ export interface ChatCompletionRequest {
   top_k: number | null
   system_prompt: string
   user_content: string
+  /** 上游 LLM 请求超时（秒），未传时后端默认 120 */
+  timeout_seconds?: number
   /** 与 API 配置页「额外请求体参数」合并进上游请求 */
   extra_body?: Record<string, unknown>
 }

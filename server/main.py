@@ -156,7 +156,14 @@ class ChatCompletionRequest(BaseModel):
     system_prompt: str
     user_content: str
     max_completion_tokens: int = Field(default=4096, ge=1)
+    timeout_seconds: Optional[float] = None
     extra_body: Optional[dict[str, Any]] = None
+
+
+def _resolve_chat_timeout(timeout_seconds: Optional[float]) -> float:
+    if timeout_seconds is None:
+        return 120.0
+    return max(30.0, min(600.0, float(timeout_seconds)))
 
 
 @app.get("/api/versions")
@@ -527,8 +534,9 @@ async def chat_completions(body: ChatCompletionRequest) -> dict[str, Any]:
         "Authorization": f"Bearer {body.api_key}",
     }
 
+    request_timeout = _resolve_chat_timeout(body.timeout_seconds)
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=request_timeout) as client:
             resp = await client.post(base_url, json=payload, headers=headers)
     except httpx.RequestError as exc:
         raise HTTPException(status_code=502, detail=f"Request failed: {exc}") from exc
