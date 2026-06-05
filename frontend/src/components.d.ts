@@ -67,6 +67,7 @@ declare module 'vue' {
     RouterView: typeof import('vue-router')['RouterView']
     RpEvalResultView: typeof import('./components/RpEvalResultView.vue')['default']
     RuntimeParamsFields: typeof import('./components/RuntimeParamsFields.vue')['default']
+    StreamingOutput: typeof import('./components/StreamingOutput.vue')['default']
     ThreeColumnPage: typeof import('./components/layout/ThreeColumnPage.vue')['default']
   }
   export interface GlobalDirectives {
