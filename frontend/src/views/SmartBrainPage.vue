@@ -27,8 +27,12 @@ import FilterBar from '../components/layout/FilterBar.vue'
 import RuntimeParamsFields from '../components/RuntimeParamsFields.vue'
 import { usePageRuntime } from '../composables/usePageRuntime'
 import { DEEPSEEK_JSON_OUTPUT_EXTRA } from '../utils/apiProfileStorage'
-import { buildBrainUserPayload } from '../utils/brainPayload'
-import { validateBrainEvalVersions } from '../utils/brainVersionGuard'
+import { buildBrainUserPayload, hasMultiModelEvalDimensions } from '../utils/brainPayload'
+import {
+  buildVersionContext,
+  formatVersionKindLabel,
+  type BrainVersionContext,
+} from '../utils/brainVersionContext'
 import {
   loadBrainSystemPrompt,
   resetBrainSystemPrompt,
@@ -39,7 +43,16 @@ import {
   parseBrainJson,
   type BrainParsed,
 } from '../utils/parseBrainJson'
-import { formatBrainPromptVersions, formatEvalPromptVersions } from '../utils/rpEvalFormat'
+import {
+  formatEvaluatedModelsLabel,
+  isMultiCompareEval,
+  parseRpEvalJson,
+} from '../utils/parseRpEvalJson'
+import {
+  formatBrainPromptVersions,
+  formatEvaluatedModels,
+  formatEvalPromptVersions,
+} from '../utils/rpEvalFormat'
 import { formatConfidence, formatHistoryTime } from '../utils/format'
 
 const brainRuntime = usePageRuntime('brain')
@@ -58,6 +71,7 @@ const evalHistory = ref<RpEvalSummary[]>([])
 const evalHistoryLoading = ref(false)
 const selectedEvalId = ref<number | null>(null)
 const selectedEvalDetail = ref<RpEvalDetail | null>(null)
+const evalVersionContexts = ref<Record<string, BrainVersionContext>>({})
 
 const brainHistory = ref<BrainAnalysisSummary[]>([])
 const brainHistoryLoading = ref(false)
@@ -79,6 +93,41 @@ const canRunBrain = computed(
   () => Boolean(selectedEvalId.value && selectedEvalDetail.value && resolvedRequest.value),
 )
 
+const selectedEvalModeLabel = computed(() => {
+  const detail = selectedEvalDetail.value
+  const summary = selectedEvalSummary.value
+  const mode = detail?.eval_mode ?? summary?.eval_mode
+  if (mode === 'multi_compare') return '多模型对比'
+  if (mode === 'single') return '单模型'
+  const models = detail?.evaluated_models ?? summary?.evaluated_models ?? []
+  return models.length > 1 ? '多模型对比' : '单模型'
+})
+
+const selectedEvaluatedModelsLabel = computed(() => {
+  const models =
+    selectedEvalDetail.value?.evaluated_models ??
+    selectedEvalSummary.value?.evaluated_models ??
+    []
+  return formatEvaluatedModelsLabel(models)
+})
+
+const selectedVersionKindLines = computed(() => {
+  const detail = selectedEvalDetail.value
+  if (!detail) return []
+  const lines: string[] = []
+  if (detail.has_compress && detail.compress_prompt_version) {
+    const ctx = evalVersionContexts.value[detail.compress_prompt_version]
+    lines.push(
+      `Compress: ${ctx ? formatVersionKindLabel(ctx) : detail.compress_prompt_version}`,
+    )
+  }
+  if (detail.has_merge && detail.merge_prompt_version) {
+    const ctx = evalVersionContexts.value[detail.merge_prompt_version]
+    lines.push(`Merge: ${ctx ? formatVersionKindLabel(ctx) : detail.merge_prompt_version}`)
+  }
+  return lines
+})
+
 watch(brainSystemPrompt, (text) => {
   saveBrainSystemPrompt(text)
 })
@@ -86,13 +135,16 @@ watch(brainSystemPrompt, (text) => {
 watch(selectedRpHistoryKey, () => {
   selectedEvalId.value = null
   selectedEvalDetail.value = null
+  evalVersionContexts.value = {}
   selectedBrainId.value = null
   currentRaw.value = ''
   currentParsed.value = null
   viewingBrainRecord.value = false
-  void syncRpHistorySelection(selectedRpHistoryKey.value)
-  void loadEvalHistory()
-  void loadBrainHistory()
+  void (async () => {
+    await syncRpHistorySelection(selectedRpHistoryKey.value)
+    await loadEvalHistory()
+    await loadBrainHistory()
+  })()
 })
 
 watch(historyTab, () => {
@@ -202,6 +254,26 @@ function handleResetPrompt() {
   ElMessage.success('已恢复默认智脑 SP')
 }
 
+async function loadEvalVersionContexts(detail: RpEvalDetail) {
+  const versions = new Set<string>()
+  if (detail.compress_prompt_version) versions.add(detail.compress_prompt_version)
+  if (detail.merge_prompt_version) versions.add(detail.merge_prompt_version)
+  if (versions.size === 0) {
+    evalVersionContexts.value = {}
+    return
+  }
+  try {
+    const catalog = await listVersions()
+    const contexts: Record<string, BrainVersionContext> = {}
+    for (const v of versions) {
+      contexts[v] = await buildVersionContext(v, catalog)
+    }
+    evalVersionContexts.value = contexts
+  } catch {
+    evalVersionContexts.value = {}
+  }
+}
+
 async function selectEvalRow(row: RpEvalSummary) {
   historyTab.value = 'eval'
   selectedEvalId.value = row.id
@@ -209,8 +281,11 @@ async function selectEvalRow(row: RpEvalSummary) {
   viewingBrainRecord.value = false
   currentRaw.value = ''
   currentParsed.value = null
+  evalVersionContexts.value = {}
   try {
-    selectedEvalDetail.value = await getRpEval(row.id)
+    const detail = await getRpEval(row.id)
+    selectedEvalDetail.value = detail
+    void loadEvalVersionContexts(detail)
   } catch (error) {
     selectedEvalDetail.value = null
     ElMessage.error(error instanceof Error ? error.message : '加载测评详情失败')
@@ -232,7 +307,9 @@ async function selectBrainRow(row: BrainAnalysisSummary) {
     currentParsed.value = parsed.ok ? parsed.data ?? null : null
     if (evalHistory.value.some((e) => e.id === detail.rp_eval_id)) {
       selectedEvalId.value = detail.rp_eval_id
-      selectedEvalDetail.value = await getRpEval(detail.rp_eval_id)
+      const evalDetail = await getRpEval(detail.rp_eval_id)
+      selectedEvalDetail.value = evalDetail
+      void loadEvalVersionContexts(evalDetail)
     }
   } catch (error) {
     currentParsed.value = null
@@ -289,17 +366,25 @@ async function handleRunBrain() {
 
   const evalDetail = selectedEvalDetail.value
   const requestConfig = resolvedRequest.value!
+  const evalMode =
+    evalDetail.eval_mode ??
+    (evalDetail.evaluated_models?.length > 1 ? 'multi_compare' : 'single')
+  const parsedEval = parseRpEvalJson(JSON.stringify(evalDetail.eval_result))
+  if (
+    evalMode === 'multi_compare' &&
+    parsedEval.ok &&
+    parsedEval.data &&
+    isMultiCompareEval(parsedEval.data) &&
+    !hasMultiModelEvalDimensions(evalDetail.eval_result)
+  ) {
+    ElMessage.warning('测评 JSON 不完整，智脑可能无法给出模型对比建议')
+  }
   analyzing.value = true
   currentRaw.value = ''
   currentParsed.value = null
 
   try {
     const versionCatalog = await listVersions()
-    const guard = await validateBrainEvalVersions(evalDetail, versionCatalog)
-    if (!guard.ok) {
-      ElMessage.warning(guard.message || '被测版本与基线或其他版本相同，请换用不同版本')
-      return
-    }
     const userContent = await buildBrainUserPayload({ evalDetail, versionCatalog })
     const extra = {
       ...(requestConfig.extra_body ?? {}),
@@ -349,6 +434,8 @@ async function handleRunBrain() {
       model: requestConfig.model,
       top_k: requestConfig.top_k ?? null,
       temperature: requestConfig.temperature,
+      eval_mode: evalMode,
+      evaluated_models: evalDetail.evaluated_models ?? [],
     })
 
     await loadBrainHistory()
@@ -445,6 +532,11 @@ onMounted(async () => {
                   {{ formatEvalPromptVersions(row as RpEvalSummary) }}
                 </template>
               </el-table-column>
+              <el-table-column label="被测" min-width="52" show-overflow-tooltip>
+                <template #default="{ row }">
+                  {{ formatEvaluatedModels(row as RpEvalSummary) }}
+                </template>
+              </el-table-column>
               <el-table-column label="分" width="32" prop="overall_score" />
             </el-table>
           </el-tab-pane>
@@ -527,6 +619,21 @@ onMounted(async () => {
                 "
                 disabled
               />
+            </el-form-item>
+            <el-form-item v-if="selectedEvalDetail && historyTab === 'eval'" label="测评模式">
+              <el-input :model-value="selectedEvalModeLabel" disabled />
+            </el-form-item>
+            <el-form-item
+              v-if="selectedEvalDetail && historyTab === 'eval'"
+              label="被测模型"
+            >
+              <el-input :model-value="selectedEvaluatedModelsLabel" disabled />
+            </el-form-item>
+            <el-form-item
+              v-if="selectedVersionKindLines.length > 0 && historyTab === 'eval'"
+              label="版本类型"
+            >
+              <el-input :model-value="selectedVersionKindLines.join('\n')" type="textarea" disabled />
             </el-form-item>
             <el-form-item v-if="selectedEvalSummary" label="测评分">
               <el-input

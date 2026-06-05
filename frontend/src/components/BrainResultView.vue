@@ -5,6 +5,7 @@ import { ElMessage } from 'element-plus'
 import { createVersion, listVersions } from '../api'
 import {
   brainRecommendationLabel,
+  devPotentialLabel,
   isValidSuggestedVersionName,
   type BrainParsed,
   type BrainRecommendation,
@@ -83,6 +84,65 @@ async function handleCreateVersion(
         {{ brainRecommendationLabel(parsed.overall) }}
       </el-tag>
       <p class="brain-rationale">{{ parsed.overall_rationale || '（无总判说明）' }}</p>
+    </div>
+
+    <div v-if="parsed.sp_improvements.length" class="brain-section-card">
+      <div class="brain-section-label">SP 可改进点</div>
+      <div
+        v-for="item in parsed.sp_improvements"
+        :key="item.prompt_type"
+        class="brain-subsection"
+      >
+        <div class="brain-module-title">{{ moduleLabel(item.prompt_type) }}</div>
+        <ul v-if="item.focus_areas.length" class="brain-focus-list">
+          <li v-for="(area, idx) in item.focus_areas" :key="`a-${idx}`">{{ area }}</li>
+        </ul>
+        <ul v-if="item.linked_issues.length" class="brain-issue-list">
+          <li v-for="(issue, idx) in item.linked_issues" :key="`i-${idx}`">{{ issue }}</li>
+        </ul>
+      </div>
+    </div>
+
+    <div
+      v-if="parsed.rp_model_insights.available"
+      class="brain-section-card"
+    >
+      <div class="brain-section-label">RP 模型开发潜力</div>
+      <p v-if="parsed.rp_model_insights.highest_dev_potential" class="brain-highlight">
+        潜力最高：{{ parsed.rp_model_insights.highest_dev_potential }}
+      </p>
+      <p v-if="parsed.rp_model_insights.ranking.length" class="brain-ranking">
+        推荐关注：{{ parsed.rp_model_insights.ranking.join(' › ') }}
+      </p>
+      <p v-if="parsed.rp_model_insights.notes" class="brain-rationale">
+        {{ parsed.rp_model_insights.notes }}
+      </p>
+      <el-table
+        v-if="parsed.rp_model_insights.per_model.length"
+        :data="parsed.rp_model_insights.per_model"
+        size="small"
+        class="brain-model-table"
+        stripe
+      >
+        <el-table-column prop="model" label="模型" min-width="88" show-overflow-tooltip />
+        <el-table-column label="分" width="40" align="center" prop="overall_score" />
+        <el-table-column label="潜力" width="48" align="center">
+          <template #default="{ row }">
+            {{ devPotentialLabel(row.dev_potential) }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="summary" label="简评" min-width="100" show-overflow-tooltip />
+      </el-table>
+      <div
+        v-for="m in parsed.rp_model_insights.per_model.filter((x) => x.sp_actionable_issues.length)"
+        :key="m.model"
+        class="brain-subsection"
+      >
+        <div class="brain-version-chip">{{ m.model }} · SP 可修复问题</div>
+        <ul class="brain-issue-list">
+          <li v-for="(issue, idx) in m.sp_actionable_issues" :key="idx">{{ issue }}</li>
+        </ul>
+      </div>
     </div>
 
     <div v-for="mod in parsed.modules" :key="mod.prompt_type" class="brain-module-card">
@@ -212,6 +272,45 @@ async function handleCreateVersion(
 .brain-section-label {
   font-weight: 600;
   margin-bottom: 4px;
+}
+
+.brain-section-card {
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: #fff;
+}
+
+.brain-subsection {
+  margin-top: 8px;
+}
+
+.brain-subsection:first-of-type {
+  margin-top: 4px;
+}
+
+.brain-highlight {
+  margin: 6px 0 0;
+  font-weight: 500;
+  color: #303133;
+}
+
+.brain-ranking {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #606266;
+}
+
+.brain-issue-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  color: #e6a23c;
+  font-size: 12px;
+}
+
+.brain-model-table {
+  margin-top: 8px;
+  width: 100%;
 }
 
 .brain-footer-actions {

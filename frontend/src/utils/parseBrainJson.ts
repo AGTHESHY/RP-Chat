@@ -1,6 +1,29 @@
 import { stripMarkdownFence } from './parseRpEvalJson'
 
 export type BrainRecommendation = 'minor' | 'major' | 'hold'
+export type BrainDevPotential = 'high' | 'medium' | 'low'
+
+export interface BrainSpImprovement {
+  prompt_type: 'segment_compress' | 'history_merge'
+  focus_areas: string[]
+  linked_issues: string[]
+}
+
+export interface BrainRpModelInsightItem {
+  model: string
+  overall_score: number
+  dev_potential: BrainDevPotential
+  sp_actionable_issues: string[]
+  summary: string
+}
+
+export interface BrainRpModelInsights {
+  available: boolean
+  highest_dev_potential: string
+  ranking: string[]
+  notes: string
+  per_model: BrainRpModelInsightItem[]
+}
 
 export interface BrainModuleAdvice {
   prompt_type: 'segment_compress' | 'history_merge'
@@ -16,6 +39,8 @@ export interface BrainModuleAdvice {
 export interface BrainParsed {
   overall: BrainRecommendation
   overall_rationale: string
+  sp_improvements: BrainSpImprovement[]
+  rp_model_insights: BrainRpModelInsights
   modules: BrainModuleAdvice[]
   next_steps: string[]
 }
@@ -28,10 +53,76 @@ export interface ParseBrainResult {
 
 const VALID_OVERALL = new Set<BrainRecommendation>(['minor', 'major', 'hold'])
 const VALID_TYPES = new Set(['segment_compress', 'history_merge'])
+const VALID_DEV_POTENTIAL = new Set<BrainDevPotential>(['high', 'medium', 'low'])
 
 function parseRecommendation(raw: unknown): BrainRecommendation {
   const v = String(raw ?? '').trim() as BrainRecommendation
   return VALID_OVERALL.has(v) ? v : 'hold'
+}
+
+function parseDevPotential(raw: unknown): BrainDevPotential {
+  const v = String(raw ?? '').trim() as BrainDevPotential
+  return VALID_DEV_POTENTIAL.has(v) ? v : 'medium'
+}
+
+function parseSpImprovement(raw: unknown): BrainSpImprovement | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const item = raw as Record<string, unknown>
+  const promptType = String(item.prompt_type ?? '').trim()
+  if (!VALID_TYPES.has(promptType)) return null
+  const focusRaw = item.focus_areas
+  const linkedRaw = item.linked_issues
+  return {
+    prompt_type: promptType as BrainSpImprovement['prompt_type'],
+    focus_areas: Array.isArray(focusRaw)
+      ? focusRaw.map((x) => String(x)).filter(Boolean)
+      : [],
+    linked_issues: Array.isArray(linkedRaw)
+      ? linkedRaw.map((x) => String(x)).filter(Boolean)
+      : [],
+  }
+}
+
+function parseRpModelInsightItem(raw: unknown): BrainRpModelInsightItem | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const item = raw as Record<string, unknown>
+  const model = String(item.model ?? '').trim()
+  if (!model) return null
+  const issuesRaw = item.sp_actionable_issues
+  return {
+    model,
+    overall_score: Math.max(0, Math.min(100, Math.round(Number(item.overall_score) || 0))),
+    dev_potential: parseDevPotential(item.dev_potential),
+    sp_actionable_issues: Array.isArray(issuesRaw)
+      ? issuesRaw.map((x) => String(x)).filter(Boolean)
+      : [],
+    summary: String(item.summary ?? ''),
+  }
+}
+
+function parseRpModelInsights(raw: unknown): BrainRpModelInsights {
+  const fallback: BrainRpModelInsights = {
+    available: false,
+    highest_dev_potential: '',
+    ranking: [],
+    notes: '',
+    per_model: [],
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return fallback
+  const item = raw as Record<string, unknown>
+  const rankingRaw = item.ranking
+  const perModelRaw = item.per_model
+  return {
+    available: Boolean(item.available),
+    highest_dev_potential: String(item.highest_dev_potential ?? ''),
+    ranking: Array.isArray(rankingRaw)
+      ? rankingRaw.map((x) => String(x)).filter(Boolean)
+      : [],
+    notes: String(item.notes ?? ''),
+    per_model: Array.isArray(perModelRaw)
+      ? perModelRaw.map(parseRpModelInsightItem).filter((m): m is BrainRpModelInsightItem => m !== null)
+      : [],
+  }
 }
 
 function parseModuleAdvice(raw: unknown): BrainModuleAdvice | null {
@@ -77,9 +168,16 @@ export function parseBrainJson(text: string): ParseBrainResult {
     const next_steps = Array.isArray(stepsRaw)
       ? stepsRaw.map((x) => String(x)).filter(Boolean)
       : []
+    const spRaw = parsed.sp_improvements
+    const sp_improvements = Array.isArray(spRaw)
+      ? spRaw.map(parseSpImprovement).filter((s): s is BrainSpImprovement => s !== null)
+      : []
+
     const data: BrainParsed = {
       overall: parseRecommendation(parsed.overall),
       overall_rationale: String(parsed.overall_rationale ?? ''),
+      sp_improvements,
+      rp_model_insights: parseRpModelInsights(parsed.rp_model_insights),
       modules,
       next_steps,
     }
@@ -96,6 +194,12 @@ export function brainRecommendationLabel(rec: BrainRecommendation): string {
   if (rec === 'minor') return '小版本更迭'
   if (rec === 'major') return '大版本换代'
   return '维持现状'
+}
+
+export function devPotentialLabel(p: BrainDevPotential): string {
+  if (p === 'high') return '高'
+  if (p === 'low') return '低'
+  return '中'
 }
 
 export function isValidSuggestedVersionName(name: string): boolean {

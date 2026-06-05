@@ -34,6 +34,8 @@ class BrainSaveRequest(BaseModel):
     model: str = ""
     top_k: Optional[int] = None
     temperature: float = 0.0
+    eval_mode: str = "single"
+    evaluated_models: list[str] = Field(default_factory=list)
 
 
 def _normalize_overall(raw: str) -> str:
@@ -55,6 +57,8 @@ def _to_summary(record: dict[str, Any]) -> dict[str, Any]:
         "merge_prompt_version": record.get("merge_prompt_version", ""),
         "overall": record.get("overall", "hold"),
         "model": record.get("model", ""),
+        "eval_mode": record.get("eval_mode", "single"),
+        "evaluated_models": record.get("evaluated_models", []),
         "created_at": record.get("created_at"),
     }
 
@@ -92,6 +96,8 @@ def create_brain_analysis(body: BrainSaveRequest) -> dict[str, Any]:
         "model": body.model or "",
         "top_k": body.top_k,
         "temperature": body.temperature,
+        "eval_mode": (body.eval_mode or "single").strip() or "single",
+        "evaluated_models": body.evaluated_models or [],
         "created_at": utc_now_iso(),
         "_created_ts": time.time(),
     }

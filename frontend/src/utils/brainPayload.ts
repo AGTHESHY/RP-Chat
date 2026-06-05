@@ -6,8 +6,9 @@ import {
   type RpEvalDetail,
   type VersionsListResponse,
 } from '../api'
-import type { RpEvalParsed } from './parseRpEvalJson'
+import type { RpEvalModuleResult, RpEvalParsed } from './parseRpEvalJson'
 import { isMultiCompareEval, parseRpEvalJson } from './parseRpEvalJson'
+import { buildVersionContext, type BrainVersionContext } from './brainVersionContext'
 
 const PROMPT_EXCERPT_MAX = 12_000
 const DOC_EXCERPT_MAX = 2000
@@ -24,6 +25,66 @@ function truncateText(text: string, max: number): { excerpt: string; truncated: 
   }
 }
 
+function weakDimensionsFromModule(
+  mod: RpEvalModuleResult,
+  label: string,
+  sourceModel?: string,
+) {
+  if (!mod.available) return []
+  return mod.dimensions
+    .filter((dim) => dim.score < 70 || dim.issues.length > 0)
+    .map((dim) => ({
+      module: label,
+      id: dim.id,
+      name: dim.name,
+      score: dim.score,
+      confidence: dim.confidence,
+      evidence: dim.evidence,
+      issues: dim.issues,
+      ...(sourceModel ? { source_model: sourceModel } : {}),
+    }))
+}
+
+function buildEvalSnapshot(
+  parsed: RpEvalParsed,
+  promptType: PromptType,
+): Record<string, unknown> {
+  if (isMultiCompareEval(parsed)) {
+    const perModel = parsed.model_scores.map((ms) => {
+      const mod =
+        promptType === 'segment_compress' ? ms.segment_compress : ms.history_merge
+      return {
+        model: ms.model,
+        subscore: mod.subscore,
+        confidence: mod.confidence,
+        weak_dimensions: weakDimensionsFromModule(mod, promptType, ms.model),
+      }
+    })
+    const available = perModel.filter((p) => p.weak_dimensions.length > 0 || p.subscore > 0)
+    const avgSubscore =
+      available.length > 0
+        ? Math.round(available.reduce((s, p) => s + p.subscore, 0) / available.length)
+        : 0
+    const allWeak = perModel.flatMap((p) => p.weak_dimensions)
+    return {
+      mode: 'multi_compare',
+      avg_subscore: avgSubscore,
+      per_model: perModel,
+      weak_dimensions: allWeak,
+    }
+  }
+
+  const mod =
+    promptType === 'segment_compress' ? parsed.segment_compress : parsed.history_merge
+  return {
+    mode: 'single',
+    subscore: mod.subscore,
+    confidence: mod.confidence,
+    available: mod.available,
+    weak_dimensions: weakDimensionsFromModule(mod, promptType),
+  }
+}
+
 function summarizeEvalForBrain(evalResult: Record<string, unknown>) {
   const parsed = parseRpEvalJson(JSON.stringify(evalResult))
   if (!parsed.ok || !parsed.data) {
@@ -33,6 +94,7 @@ function summarizeEvalForBrain(evalResult: Record<string, unknown>) {
     }
   }
   const d = parsed.data
+
   if (isMultiCompareEval(d)) {
     return {
       parse_ok: true,
@@ -46,26 +108,21 @@ function summarizeEvalForBrain(evalResult: Record<string, unknown>) {
         overall_score: m.overall_score,
         overall_confidence: m.overall_confidence,
         summary: m.summary,
+        segment_compress: m.segment_compress,
+        history_merge: m.history_merge,
+        cross_consistency: m.cross_consistency,
+        weak_dimensions: [
+          ...weakDimensionsFromModule(m.segment_compress, 'segment_compress', m.model),
+          ...weakDimensionsFromModule(m.history_merge, 'history_merge', m.model),
+        ],
       })),
       cross_model_comparison: d.cross_model_comparison,
     }
   }
-  const weakDimensions = (mod: RpEvalParsed['segment_compress'], label: string) => {
-    if (!mod.available) return []
-    return mod.dimensions
-      .filter((dim) => dim.score < 70 || dim.issues.length > 0)
-      .map((dim) => ({
-        module: label,
-        id: dim.id,
-        name: dim.name,
-        score: dim.score,
-        confidence: dim.confidence,
-        evidence: dim.evidence,
-        issues: dim.issues,
-      }))
-  }
+
   return {
     parse_ok: true,
+    eval_mode: 'single' as const,
     overall_score: d.overall_score,
     overall_confidence: d.overall_confidence,
     summary: d.summary,
@@ -74,13 +131,17 @@ function summarizeEvalForBrain(evalResult: Record<string, unknown>) {
     history_merge: d.history_merge,
     cross_consistency: d.cross_consistency,
     weak_dimensions: [
-      ...weakDimensions(d.segment_compress, 'segment_compress'),
-      ...weakDimensions(d.history_merge, 'history_merge'),
+      ...weakDimensionsFromModule(d.segment_compress, 'segment_compress'),
+      ...weakDimensionsFromModule(d.history_merge, 'history_merge'),
     ],
   }
 }
 
-async function loadModulePromptContext(version: string, promptType: PromptType) {
+async function loadModulePromptContext(
+  version: string,
+  promptType: PromptType,
+  evalSnapshot: Record<string, unknown>,
+) {
   const meta = await getVersionMeta(version)
   const prompt = await getVersionPrompt(version, promptType, 'zh', true)
   const { excerpt, truncated, total_length } = truncateText(prompt.content || '', PROMPT_EXCERPT_MAX)
@@ -105,6 +166,7 @@ async function loadModulePromptContext(version: string, promptType: PromptType) 
     prompt_total_length: total_length,
     changelog_excerpt,
     changelog_truncated,
+    eval_snapshot: evalSnapshot,
   }
 }
 
@@ -113,19 +175,50 @@ export interface BuildBrainPayloadInput {
   versionCatalog: VersionsListResponse
 }
 
+export function hasMultiModelEvalDimensions(evalResult: Record<string, unknown>): boolean {
+  const parsed = parseRpEvalJson(JSON.stringify(evalResult))
+  if (!parsed.ok || !parsed.data || !isMultiCompareEval(parsed.data)) return true
+  return parsed.data.model_scores.some(
+    (m) =>
+      m.segment_compress.dimensions.length > 0 || m.history_merge.dimensions.length > 0,
+  )
+}
+
 export async function buildBrainUserPayload(input: BuildBrainPayloadInput): Promise<string> {
   const { evalDetail, versionCatalog } = input
+  const parsedEval = parseRpEvalJson(JSON.stringify(evalDetail.eval_result))
   const evalSummary = summarizeEvalForBrain(evalDetail.eval_result)
 
+  const evaluatedModels = Array.isArray(evalDetail.evaluated_models)
+    ? evalDetail.evaluated_models
+    : []
+  const evalMode = evalDetail.eval_mode ?? (evaluatedModels.length > 1 ? 'multi_compare' : 'single')
+
+  const versionContexts: BrainVersionContext[] = []
+  const versionSet = new Set<string>()
+  if (evalDetail.compress_prompt_version) versionSet.add(evalDetail.compress_prompt_version)
+  if (evalDetail.merge_prompt_version) versionSet.add(evalDetail.merge_prompt_version)
+  for (const v of versionSet) {
+    versionContexts.push(await buildVersionContext(v, versionCatalog))
+  }
+
   const modules: Awaited<ReturnType<typeof loadModulePromptContext>>[] = []
-  if (evalDetail.has_compress && evalDetail.compress_prompt_version) {
+  if (evalDetail.has_compress && evalDetail.compress_prompt_version && parsedEval.ok && parsedEval.data) {
     modules.push(
-      await loadModulePromptContext(evalDetail.compress_prompt_version, 'segment_compress'),
+      await loadModulePromptContext(
+        evalDetail.compress_prompt_version,
+        'segment_compress',
+        buildEvalSnapshot(parsedEval.data, 'segment_compress'),
+      ),
     )
   }
-  if (evalDetail.has_merge && evalDetail.merge_prompt_version) {
+  if (evalDetail.has_merge && evalDetail.merge_prompt_version && parsedEval.ok && parsedEval.data) {
     modules.push(
-      await loadModulePromptContext(evalDetail.merge_prompt_version, 'history_merge'),
+      await loadModulePromptContext(
+        evalDetail.merge_prompt_version,
+        'history_merge',
+        buildEvalSnapshot(parsedEval.data, 'history_merge'),
+      ),
     )
   }
 
@@ -137,10 +230,13 @@ export async function buildBrainUserPayload(input: BuildBrainPayloadInput): Prom
       round_end: evalDetail.round_end,
       compress_prompt_version: evalDetail.compress_prompt_version,
       merge_prompt_version: evalDetail.merge_prompt_version,
-      eval_model: evalDetail.model,
+      eval_mode: evalMode,
+      evaluated_models: evaluatedModels,
+      judge_model: evalDetail.model,
     },
     eval_summary: evalSummary,
     modules,
+    version_context: versionContexts,
     version_catalog: {
       baselines: versionCatalog.baselines,
       custom: versionCatalog.custom.map((v) => ({

@@ -638,6 +638,8 @@ export interface BrainAnalysisSummary {
   merge_prompt_version: string
   overall: BrainRecommendation
   model: string
+  eval_mode?: 'single' | 'multi_compare'
+  evaluated_models?: string[]
   created_at: string | null
 }
 
@@ -665,6 +667,8 @@ export interface BrainSavePayload {
   model: string
   top_k: number | null
   temperature: number
+  eval_mode?: 'single' | 'multi_compare'
+  evaluated_models?: string[]
 }
 
 export function listBrainAnalyses(params: {
