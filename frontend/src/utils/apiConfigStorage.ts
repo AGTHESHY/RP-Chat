@@ -40,9 +40,9 @@ export interface ApiConfig {
 export const API_CONFIG_STORAGE_KEY = 'rp-chat-api-config'
 
 export const defaultApiConfig: ApiConfig = {
-  base_url: 'http://32.194.212.226:3000/v1/chat/completions',
+  base_url: 'https://api.openai.com/v1/chat/completions',
   api_key: '',
-  model: 'deepseek-v4-pro-none',
+  model: 'gpt-4o',
   temperature: 0.3,
   top_k: null,
 }

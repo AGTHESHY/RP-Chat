@@ -174,7 +174,7 @@ function fillDeepseekJsonOutput() {
             <el-form-item label="BASE_URL">
               <el-input
                 v-model="selectedProfile.base_url"
-                placeholder="如 http://host:3000，将自动补全 /v1/chat/completions"
+                placeholder="如 https://api.openai.com/v1，将自动补全 /v1/chat/completions"
                 @blur="normalizeProfileBaseUrl(selectedProfile)"
               />
             </el-form-item>
