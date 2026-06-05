@@ -60,6 +60,11 @@ revision_plan 每项字段：
 
 SFW 与 NSFW 须分别列出：同一 focus_area 若在 NSFW 场景有额外约束，NSFW 侧 detail 须写清差异。
 
+## 语言要求
+- **推理 / 思考（reasoning）**：可使用英文。
+- **最终 JSON 正文**：面向中国用户；overall_rationale、summary、focus_areas、linked_issues、notes、detail、revision_plan 各字段等所有面向读者的自然语言**必须使用简体中文**，不得用英文作为正文输出。
+- JSON 键名、prompt_type、model 名、版本号等技术标识可保持英文。
+
 ## 输出格式（严格遵守）
 1. 仅输出一个 JSON 对象，以 { 开头、} 结尾
 2. 禁止 markdown 代码块、禁止前后解释文字

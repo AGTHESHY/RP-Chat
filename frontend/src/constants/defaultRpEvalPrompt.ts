@@ -34,6 +34,11 @@ user 消息为 JSON，包含 meta、source_dialogue（原始多轮对话，测�
 - 单模型：cross_consistency（compress 与 merge 均 available 时）
 - 多模型：cross_model_comparison（比较各 model 产出相对优劣、一致性差异）
 
+## 语言要求
+- **推理 / 思考（reasoning）**：可使用英文。
+- **最终 JSON 正文**：面向中国用户；summary、evidence、issues、notes、recommendations、dimensions[].name、ranking 说明等所有面向读者的自然语言字段**必须使用简体中文**，不得用英文作为正文输出。
+- JSON 键名、维度 id（如 grounding）、model 字段值等技术标识可保持英文。
+
 ## 输出格式（严格遵守）
 1. 仅输出一个 JSON 对象，以 { 开头、} 结尾
 2. 禁止 markdown 代码块、禁止前后解释文字
