@@ -30,8 +30,8 @@ services:
       - ""
 
   backend:
-    mem_limit: 320m
-    mem_reservation: 192m
+    mem_limit: 384m
+    mem_reservation: 224m
     oom_score_adj: 300
 
   frontend:

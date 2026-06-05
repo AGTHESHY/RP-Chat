@@ -22,7 +22,11 @@ wait_healthy() {
     fi
     if [[ "$status" == "unhealthy" ]]; then
       echo "错误: ${container} 健康检查失败" >&2
-      docker logs --tail 50 "$container" >&2 || true
+      docker logs --tail 80 "$container" >&2 || true
+      return 1
+    fi
+    if [[ "$status" == "missing" ]]; then
+      echo "错误: 容器 ${container} 不存在" >&2
       return 1
     fi
     sleep 2
@@ -30,6 +34,7 @@ wait_healthy() {
   done
 
   echo "错误: 等待 ${container} 超时（${timeout}s）" >&2
+  docker logs --tail 80 "$container" >&2 || true
   return 1
 }
 
@@ -50,7 +55,7 @@ wait_healthy rp-chat-redis 60
 
 echo "==> 3/4 启动 Backend"
 "${COMPOSE[@]}" up -d backend
-wait_healthy rp-chat-backend 180
+wait_healthy rp-chat-backend 360
 
 echo "==> 4/4 启动 Frontend"
 "${COMPOSE[@]}" up -d frontend

@@ -1,7 +1,9 @@
 """RP Chat Prompt Manager & Test API."""
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
@@ -87,6 +89,20 @@ from version_service import (
     validate_writable,
 )
 
+logger = logging.getLogger("uvicorn.error")
+
+
+def _run_seed_bootstrap() -> None:
+    db = SessionLocal()
+    try:
+        bootstrap_seed_data(db)
+        logger.info("Seed bootstrap finished")
+    except Exception:
+        logger.exception("Seed bootstrap failed")
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -100,10 +116,18 @@ async def lifespan(app: FastAPI):
         migrate_chat_qa_schema(db)
         migrate_prompt_test_result_schema(db)
         migrate_rp_eval_schema(db)
-        bootstrap_seed_data(db)
     finally:
         db.close()
+
+    loop = asyncio.get_running_loop()
+    bootstrap_future = loop.run_in_executor(None, _run_seed_bootstrap)
+
     yield
+
+    try:
+        await asyncio.wait_for(bootstrap_future, timeout=300)
+    except asyncio.TimeoutError:
+        logger.warning("Seed bootstrap still running during shutdown")
 
 
 app = FastAPI(title="RP Chat Prompt API", lifespan=lifespan)
@@ -115,6 +139,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/api/health")
+def health_check() -> dict[str, str]:
+    return {"status": "ok"}
 
 
 class CreateVersionRequest(BaseModel):
