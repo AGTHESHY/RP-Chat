@@ -1,6 +1,7 @@
 """RP Chat Prompt Manager & Test API."""
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
@@ -515,6 +516,102 @@ def api_delete_brain_analysis(record_id: int) -> dict[str, Any]:
     return delete_brain_analysis(record_id)
 
 
+def _accumulate_stream_chunk(chunk: dict[str, Any], acc: dict[str, Any]) -> None:
+    """累积一个 SSE chunk 到 acc（content / reasoning / finish_reason / usage）。"""
+    usage = chunk.get("usage")
+    if isinstance(usage, dict) and usage:
+        acc["usage"] = usage
+
+    choices = chunk.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return
+    choice = choices[0] or {}
+
+    delta = choice.get("delta")
+    if isinstance(delta, dict):
+        content = delta.get("content")
+        if isinstance(content, str):
+            acc["content"].append(content)
+        reasoning = delta.get("reasoning_content")
+        if isinstance(reasoning, str):
+            acc["reasoning"].append(reasoning)
+    else:
+        # 个别网关流式仍返回 message（非增量），兜底取整段
+        message = choice.get("message")
+        if isinstance(message, dict):
+            if isinstance(message.get("content"), str):
+                acc["content"].append(message["content"])
+            if isinstance(message.get("reasoning_content"), str):
+                acc["reasoning"].append(message["reasoning_content"])
+
+    finish = choice.get("finish_reason")
+    if finish:
+        acc["finish_reason"] = finish
+
+
+async def _stream_chat_completion(
+    base_url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    httpx_timeout: "httpx.Timeout",
+) -> dict[str, Any]:
+    """以流式方式请求上游并累积结果，避免网关读取整段 body 超时。"""
+    acc: dict[str, Any] = {
+        "content": [],
+        "reasoning": [],
+        "finish_reason": None,
+        "usage": {},
+    }
+    stream_error: Optional[str] = None
+    status_code = 200
+
+    async with httpx.AsyncClient(timeout=httpx_timeout) as client:
+        async with client.stream(
+            "POST", base_url, json=payload, headers=headers
+        ) as resp:
+            status_code = resp.status_code
+            if resp.status_code != 200:
+                body_bytes = await resp.aread()
+                return {
+                    "status": resp.status_code,
+                    "error": body_bytes.decode("utf-8", "replace")[:2000],
+                    "raw_text": body_bytes.decode("utf-8", "replace")[:8000],
+                }
+
+            async for line in resp.aiter_lines():
+                if not line:
+                    continue
+                line = line.strip()
+                if not line.startswith("data:"):
+                    continue
+                data_str = line[len("data:"):].strip()
+                if not data_str or data_str == "[DONE]":
+                    if data_str == "[DONE]":
+                        break
+                    continue
+                try:
+                    chunk = json.loads(data_str)
+                except ValueError:
+                    continue
+                if isinstance(chunk, dict) and chunk.get("error"):
+                    stream_error = json.dumps(chunk["error"], ensure_ascii=False)
+                    continue
+                _accumulate_stream_chunk(chunk, acc)
+
+    raw_content = "".join(acc["content"])
+    result: dict[str, Any] = {
+        "status": status_code,
+        "raw_content": raw_content,
+        "reasoning_content": "".join(acc["reasoning"]),
+        "finish_reason": acc["finish_reason"],
+        "usage": acc["usage"],
+        "raw_text": raw_content[:8000],
+    }
+    if stream_error and not raw_content:
+        result["error"] = stream_error
+    return result
+
+
 @app.post("/api/chat/completions")
 async def chat_completions(body: ChatCompletionRequest) -> dict[str, Any]:
     base_url = normalize_base_url(body.base_url)
@@ -524,7 +621,8 @@ async def chat_completions(body: ChatCompletionRequest) -> dict[str, Any]:
             {"role": "system", "content": body.system_prompt},
             {"role": "user", "content": body.user_content},
         ],
-        "stream": False,
+        "stream": True,
+        "stream_options": {"include_usage": True},
         "max_completion_tokens": _resolve_max_completion_tokens(body.max_completion_tokens),
         "temperature": body.temperature,
     }
@@ -541,10 +639,10 @@ async def chat_completions(body: ChatCompletionRequest) -> dict[str, Any]:
     }
 
     request_timeout = _resolve_chat_timeout(body.timeout_seconds)
-    httpx_timeout = httpx.Timeout(request_timeout, connect=30.0)
+    # 流式下需放宽「单次读取」超时，避免长间隔 token 触发 read timeout
+    httpx_timeout = httpx.Timeout(request_timeout, connect=30.0, read=request_timeout)
     try:
-        async with httpx.AsyncClient(timeout=httpx_timeout) as client:
-            resp = await client.post(base_url, json=payload, headers=headers)
+        return await _stream_chat_completion(base_url, payload, headers, httpx_timeout)
     except httpx.TimeoutException as exc:
         raise HTTPException(
             status_code=504,
@@ -552,30 +650,3 @@ async def chat_completions(body: ChatCompletionRequest) -> dict[str, Any]:
         ) from exc
     except httpx.RequestError as exc:
         raise HTTPException(status_code=502, detail=f"Request failed: {exc}") from exc
-
-    result: dict[str, Any] = {
-        "status": resp.status_code,
-        "raw_text": resp.text[:8000] if resp.text else "",
-    }
-
-    if resp.status_code != 200:
-        result["error"] = resp.text[:2000] if resp.text else ""
-        return result
-
-    try:
-        data = resp.json()
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Upstream returned non-JSON body: {resp.text[:500]}",
-        ) from exc
-    result["data"] = data
-    result["usage"] = data.get("usage", {})
-
-    choice = data.get("choices", [{}])[0]
-    message = choice.get("message", {})
-    result["raw_content"] = message.get("content", "")
-    result["reasoning_content"] = message.get("reasoning_content", "")
-    result["finish_reason"] = choice.get("finish_reason")
-
-    return result
