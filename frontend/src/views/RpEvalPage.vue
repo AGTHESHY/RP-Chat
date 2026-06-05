@@ -7,7 +7,7 @@ import {
   getRpHistoryDetail,
   listRpEvaluations,
   listRpHistory,
-  runChatCompletion,
+  streamChatCompletion,
   deleteRpEval,
   saveRpEval,
   type RpEvalDetail,
@@ -18,6 +18,7 @@ import {
 } from '../api'
 import ApiRuntimePicker from '../components/ApiRuntimePicker.vue'
 import RpEvalResultView from '../components/RpEvalResultView.vue'
+import StreamResultPanel from '../components/StreamResultPanel.vue'
 import ThreeColumnPage from '../components/layout/ThreeColumnPage.vue'
 import AppPanel from '../components/layout/AppPanel.vue'
 import FilterBar from '../components/layout/FilterBar.vue'
@@ -72,6 +73,10 @@ const selectedEvalId = ref<number | null>(null)
 const selectedEvalDetail = ref<RpEvalDetail | null>(null)
 const viewingEvalRecord = ref(false)
 const currentRaw = ref('')
+const currentReasoning = ref('')
+const streaming = ref(false)
+const streamPanelActive = ref(false)
+let streamAbort: AbortController | null = null
 const currentParsed = ref<RpEvalParsed | null>(null)
 
 const selectedRpHistorySummary = computed(
@@ -135,6 +140,14 @@ const canRunEval = computed(() => {
   if (!selectedRpHistoryKey.value || !rpHistoryDetail.value) return false
   return selectedModelRuns.value.length > 0 && Boolean(resolvedRequest.value)
 })
+
+const runtimeParamsHidden = computed(
+  () => evaluating.value || streaming.value || streamPanelActive.value,
+)
+
+function showRuntimeParamsAgain() {
+  streamPanelActive.value = false
+}
 
 function isModelRunEvaluable(run: RpHistoryModelRun): boolean {
   return Boolean(run.compress || run.merge)
@@ -356,11 +369,17 @@ async function handleRunEval() {
   const modelRuns = selectedModelRuns.value
   const requestConfig = resolvedRequest.value!
   evaluating.value = true
+  streaming.value = true
+  streamPanelActive.value = true
   viewingEvalRecord.value = false
   currentRaw.value = ''
+  currentReasoning.value = ''
   currentParsed.value = null
   selectedEvalId.value = null
   selectedEvalDetail.value = null
+
+  const timeoutSeconds = computeAdaptiveChatTimeout(modelRuns.length)
+  streamAbort = new AbortController()
 
   try {
     const conv = await getChatQaConversation({
@@ -378,35 +397,48 @@ async function handleRunEval() {
       ...(requestConfig.extra_body ?? {}),
       ...DEEPSEEK_JSON_OUTPUT_EXTRA,
     }
-    const resp = await runChatCompletion({
-      base_url: requestConfig.base_url,
-      api_key: requestConfig.api_key,
-      model: requestConfig.model,
-      temperature: requestConfig.temperature,
-      top_k: requestConfig.top_k ?? null,
-      extra_body: evalExtraBody,
-      system_prompt: evalSystemPrompt.value,
-      user_content: userContent,
-      timeout_seconds: computeAdaptiveChatTimeout(modelRuns.length),
-      max_completion_tokens: computeAdaptiveMaxCompletionTokens(modelRuns.length),
-    })
+    const resp = await streamChatCompletion(
+      {
+        base_url: requestConfig.base_url,
+        api_key: requestConfig.api_key,
+        model: requestConfig.model,
+        temperature: requestConfig.temperature,
+        top_k: requestConfig.top_k ?? null,
+        extra_body: evalExtraBody,
+        system_prompt: evalSystemPrompt.value,
+        user_content: userContent,
+        timeout_seconds: timeoutSeconds,
+        max_completion_tokens: computeAdaptiveMaxCompletionTokens(modelRuns.length),
+      },
+      {
+        onContent: (_piece, full) => {
+          currentRaw.value = full
+        },
+        onReasoning: (_piece, full) => {
+          currentReasoning.value = full
+        },
+      },
+      streamAbort.signal,
+    )
 
-    const raw = resp.raw_content || resp.error || resp.raw_text || ''
+    const raw = resp.raw_content || resp.error || ''
     currentRaw.value = raw
 
     if (resp.status !== 200) {
-      const detail = (resp.error || resp.raw_text || '').trim().slice(0, 240)
+      const errDetail = (resp.error || '').trim().slice(0, 240)
       ElMessage.error(
-        detail
-          ? `测评请求失败: HTTP ${resp.status} — ${detail}`
+        errDetail
+          ? `测评请求失败: HTTP ${resp.status} — ${errDetail}`
           : `测评请求失败: HTTP ${resp.status}`,
       )
+      streaming.value = false
       return
     }
 
     const parsed = parseRpEvalJson(raw)
     if (!parsed.ok || !parsed.data) {
       ElMessage.warning(parsed.error || '测评 JSON 解析失败，未入库')
+      streaming.value = false
       return
     }
     currentParsed.value = parsed.data
@@ -437,10 +469,17 @@ async function handleRunEval() {
 
     selectedEvalId.value = saved.id
     await loadEvalHistory()
+    streaming.value = false
     ElMessage.success('测评完成并已保存')
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '测评失败')
+    streaming.value = false
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      ElMessage.error(`测评超时（连续 ${timeoutSeconds}s 无数据），请重试或减少对比模型数`)
+    } else {
+      ElMessage.error(error instanceof Error ? error.message : '测评失败')
+    }
   } finally {
+    streamAbort = null
     evaluating.value = false
   }
 }
@@ -449,6 +488,9 @@ async function selectEvalRow(row: RpEvalSummary) {
   historyTab.value = 'eval'
   selectedEvalId.value = row.id
   viewingEvalRecord.value = true
+  streaming.value = false
+  streamPanelActive.value = false
+  currentReasoning.value = ''
   try {
     const detail = await getRpEval(row.id)
     selectedEvalDetail.value = detail
@@ -495,6 +537,8 @@ onMounted(async () => {
 onUnmounted(() => {
   modelTableResizeObserver?.disconnect()
   modelTableResizeObserver = null
+  streamAbort?.abort()
+  streamAbort = null
 })
 </script>
 
@@ -787,38 +831,46 @@ onUnmounted(() => {
         </template>
         <div
           class="test-panel-body"
-          :class="{ 'test-panel-body--preview': viewingEvalRecord }"
+          :class="{ 'test-panel-body--preview': viewingEvalRecord || runtimeParamsHidden }"
         >
-          <el-form v-if="!viewingEvalRecord" label-width="88px" class="test-form">
-            <RuntimeParamsFields
-              :temperature="runtime.temperature"
-              :top-k="runtime.top_k"
-              @update:temperature="runtime.temperature = $event"
-              @update:top-k="runtime.top_k = $event"
+          <Transition name="params-collapse">
+            <el-form
+              v-if="!viewingEvalRecord && !runtimeParamsHidden"
+              label-width="88px"
+              class="test-form"
             >
-              <template #top-k-suffix>
-                <el-button
-                  type="primary"
-                  :loading="evaluating"
-                  :disabled="!canRunEval"
-                  @click="handleRunEval"
-                >
-                  开始测评
-                </el-button>
-              </template>
-            </RuntimeParamsFields>
-          </el-form>
+              <RuntimeParamsFields
+                :temperature="runtime.temperature"
+                :top-k="runtime.top_k"
+                @update:temperature="runtime.temperature = $event"
+                @update:top-k="runtime.top_k = $event"
+              >
+                <template #top-k-suffix>
+                  <el-button
+                    type="primary"
+                    :loading="evaluating"
+                    :disabled="!canRunEval"
+                    @click="handleRunEval"
+                  >
+                    开始测评
+                  </el-button>
+                </template>
+              </RuntimeParamsFields>
+            </el-form>
+          </Transition>
 
-          <div v-if="currentRaw || currentParsed" class="result-block">
+          <div v-if="streamPanelActive || currentRaw || currentParsed" class="result-block">
             <div class="result-title-row">
               <div class="result-title-main">
                 <span class="result-title">
                   {{
-                    viewingEvalRecord && selectedEvalId
-                      ? `测评记录 #${selectedEvalId}`
-                      : selectedEvalId
-                        ? `测评结果 #${selectedEvalId}`
-                        : '本次测评结果'
+                    streaming
+                      ? '测评生成中'
+                      : viewingEvalRecord && selectedEvalId
+                        ? `测评记录 #${selectedEvalId}`
+                        : selectedEvalId
+                          ? `测评结果 #${selectedEvalId}`
+                          : '本次测评结果'
                   }}
                 </span>
                 <span
@@ -844,8 +896,26 @@ onUnmounted(() => {
                   <span class="record-meta-value">{{ evalRecordTopK }}</span>
                 </span>
               </div>
+              <el-button
+                v-else-if="runtimeParamsHidden && !streaming && !evaluating"
+                link
+                type="primary"
+                size="small"
+                @click="showRuntimeParamsAgain"
+              >
+                重新测评
+              </el-button>
             </div>
-            <el-scrollbar class="result-scroll">
+            <StreamResultPanel
+              v-if="streamPanelActive"
+              class="result-scroll"
+              :streaming="streaming"
+              :content="currentRaw"
+              :reasoning="currentReasoning"
+            >
+              <RpEvalResultView :raw-content="currentRaw" :parsed="currentParsed" />
+            </StreamResultPanel>
+            <el-scrollbar v-else class="result-scroll">
               <RpEvalResultView :raw-content="currentRaw" :parsed="currentParsed" />
             </el-scrollbar>
           </div>
@@ -876,6 +946,44 @@ onUnmounted(() => {
 
 .test-panel-body--preview .result-block {
   padding-top: 14px;
+}
+
+.params-collapse-leave-active {
+  transition:
+    opacity 0.35s ease,
+    max-height 0.5s cubic-bezier(0.4, 0, 0.2, 1),
+    margin 0.5s cubic-bezier(0.4, 0, 0.2, 1),
+    padding 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
+}
+
+.params-collapse-leave-from {
+  opacity: 1;
+  max-height: 100px;
+}
+
+.params-collapse-leave-to {
+  opacity: 0;
+  max-height: 0;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.params-collapse-enter-active {
+  transition:
+    opacity 0.4s ease 0.08s,
+    max-height 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
+}
+
+.params-collapse-enter-from {
+  opacity: 0;
+  max-height: 0;
+}
+
+.params-collapse-enter-to {
+  opacity: 1;
+  max-height: 100px;
 }
 
 .result-block {

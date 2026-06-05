@@ -8,6 +8,7 @@ from typing import Any, Optional
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -162,9 +163,15 @@ class ChatCompletionRequest(BaseModel):
 
 
 def _resolve_chat_timeout(timeout_seconds: Optional[float]) -> float:
+    """流式空闲超时：连续无数据的最长等待秒数（非总时长）。"""
     if timeout_seconds is None:
         return 120.0
     return max(30.0, min(600.0, float(timeout_seconds)))
+
+
+def _stream_httpx_timeout(idle_seconds: float) -> httpx.Timeout:
+    """流式上游：read 为 chunk 间空闲超时，不设总时长上限。"""
+    return httpx.Timeout(connect=30.0, read=idle_seconds, write=60.0, pool=30.0)
 
 
 def _resolve_max_completion_tokens(max_completion_tokens: Optional[int]) -> int:
@@ -516,6 +523,176 @@ def api_delete_brain_analysis(record_id: int) -> dict[str, Any]:
     return delete_brain_analysis(record_id)
 
 
+def _build_chat_payload(body: ChatCompletionRequest) -> dict[str, Any]:
+    """构造上游 Chat Completions 流式请求体（两个端点共用）。"""
+    payload: dict[str, Any] = {
+        "model": body.model,
+        "messages": [
+            {"role": "system", "content": body.system_prompt},
+            {"role": "user", "content": body.user_content},
+        ],
+        "stream": True,
+        "stream_options": {"include_usage": True},
+        "max_completion_tokens": _resolve_max_completion_tokens(body.max_completion_tokens),
+        "temperature": body.temperature,
+    }
+    if body.top_k is not None:
+        payload["top_k"] = body.top_k
+    if body.extra_body:
+        for key, value in body.extra_body.items():
+            if value is not None:
+                payload[key] = value
+    return payload
+
+
+def _extract_stream_delta(chunk: dict[str, Any]) -> dict[str, Any]:
+    """从单个 SSE chunk 提取增量：content / reasoning / finish_reason / usage。"""
+    out: dict[str, Any] = {
+        "content": "",
+        "reasoning": "",
+        "finish_reason": None,
+        "usage": None,
+    }
+    usage = chunk.get("usage")
+    if isinstance(usage, dict) and usage:
+        out["usage"] = usage
+
+    choices = chunk.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return out
+    choice = choices[0] or {}
+
+    delta = choice.get("delta")
+    if isinstance(delta, dict):
+        if isinstance(delta.get("content"), str):
+            out["content"] = delta["content"]
+        if isinstance(delta.get("reasoning_content"), str):
+            out["reasoning"] = delta["reasoning_content"]
+    else:
+        message = choice.get("message")
+        if isinstance(message, dict):
+            if isinstance(message.get("content"), str):
+                out["content"] = message["content"]
+            if isinstance(message.get("reasoning_content"), str):
+                out["reasoning"] = message["reasoning_content"]
+
+    finish = choice.get("finish_reason")
+    if finish:
+        out["finish_reason"] = finish
+    return out
+
+
+def _sse_event(payload: dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+async def _iter_chat_stream(
+    base_url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    httpx_timeout: "httpx.Timeout",
+    request_timeout: float,
+):
+    """向前端透传归一化 SSE：delta / done / error。"""
+    try:
+        async with httpx.AsyncClient(timeout=httpx_timeout) as client:
+            async with client.stream(
+                "POST", base_url, json=payload, headers=headers
+            ) as resp:
+                if resp.status_code != 200:
+                    body_bytes = await resp.aread()
+                    yield _sse_event(
+                        {
+                            "type": "error",
+                            "status": resp.status_code,
+                            "error": body_bytes.decode("utf-8", "replace")[:2000],
+                        }
+                    )
+                    return
+
+                finish_reason: Optional[str] = None
+                usage: dict[str, Any] = {}
+                got_content = False
+                stream_error: Optional[str] = None
+
+                async for line in resp.aiter_lines():
+                    if not line:
+                        continue
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line[len("data:"):].strip()
+                    if not data_str:
+                        continue
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                    except ValueError:
+                        continue
+                    if isinstance(chunk, dict) and chunk.get("error"):
+                        stream_error = json.dumps(chunk["error"], ensure_ascii=False)
+                        continue
+
+                    delta = _extract_stream_delta(chunk)
+                    if delta["usage"]:
+                        usage = delta["usage"]
+                    if delta["finish_reason"]:
+                        finish_reason = delta["finish_reason"]
+                    if delta["content"] or delta["reasoning"]:
+                        if delta["content"]:
+                            got_content = True
+                        yield _sse_event(
+                            {
+                                "type": "delta",
+                                "content": delta["content"],
+                                "reasoning": delta["reasoning"],
+                            }
+                        )
+
+                if stream_error and not got_content:
+                    yield _sse_event({"type": "error", "status": 200, "error": stream_error})
+                    return
+
+                yield _sse_event(
+                    {
+                        "type": "done",
+                        "finish_reason": finish_reason,
+                        "usage": usage,
+                    }
+                )
+    except httpx.TimeoutException as exc:
+        yield _sse_event(
+            {
+                "type": "error",
+                "status": 504,
+                "error": f"Upstream idle timed out after {int(request_timeout)}s without data: {exc}",
+            }
+        )
+    except httpx.RequestError as exc:
+        yield _sse_event({"type": "error", "status": 502, "error": f"Request failed: {exc}"})
+
+
+@app.post("/api/chat/completions/stream")
+async def chat_completions_stream(body: ChatCompletionRequest) -> StreamingResponse:
+    base_url = normalize_base_url(body.base_url)
+    payload = _build_chat_payload(body)
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {body.api_key}",
+    }
+    request_timeout = _resolve_chat_timeout(body.timeout_seconds)
+    httpx_timeout = _stream_httpx_timeout(request_timeout)
+    return StreamingResponse(
+        _iter_chat_stream(base_url, payload, headers, httpx_timeout, request_timeout),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 def _accumulate_stream_chunk(chunk: dict[str, Any], acc: dict[str, Any]) -> None:
     """累积一个 SSE chunk 到 acc（content / reasoning / finish_reason / usage）。"""
     usage = chunk.get("usage")
@@ -615,23 +792,7 @@ async def _stream_chat_completion(
 @app.post("/api/chat/completions")
 async def chat_completions(body: ChatCompletionRequest) -> dict[str, Any]:
     base_url = normalize_base_url(body.base_url)
-    payload: dict[str, Any] = {
-        "model": body.model,
-        "messages": [
-            {"role": "system", "content": body.system_prompt},
-            {"role": "user", "content": body.user_content},
-        ],
-        "stream": True,
-        "stream_options": {"include_usage": True},
-        "max_completion_tokens": _resolve_max_completion_tokens(body.max_completion_tokens),
-        "temperature": body.temperature,
-    }
-    if body.top_k is not None:
-        payload["top_k"] = body.top_k
-    if body.extra_body:
-        for key, value in body.extra_body.items():
-            if value is not None:
-                payload[key] = value
+    payload = _build_chat_payload(body)
 
     headers = {
         "Content-Type": "application/json",
@@ -639,14 +800,13 @@ async def chat_completions(body: ChatCompletionRequest) -> dict[str, Any]:
     }
 
     request_timeout = _resolve_chat_timeout(body.timeout_seconds)
-    # 流式下需放宽「单次读取」超时，避免长间隔 token 触发 read timeout
-    httpx_timeout = httpx.Timeout(request_timeout, connect=30.0, read=request_timeout)
+    httpx_timeout = _stream_httpx_timeout(request_timeout)
     try:
         return await _stream_chat_completion(base_url, payload, headers, httpx_timeout)
     except httpx.TimeoutException as exc:
         raise HTTPException(
             status_code=504,
-            detail=f"Upstream timed out after {int(request_timeout)}s: {exc}",
+            detail=f"Upstream idle timed out after {int(request_timeout)}s without data: {exc}",
         ) from exc
     except httpx.RequestError as exc:
         raise HTTPException(status_code=502, detail=f"Request failed: {exc}") from exc

@@ -68,6 +68,7 @@ declare module 'vue' {
     RpEvalResultView: typeof import('./components/RpEvalResultView.vue')['default']
     RuntimeParamsFields: typeof import('./components/RuntimeParamsFields.vue')['default']
     StreamingOutput: typeof import('./components/StreamingOutput.vue')['default']
+    StreamResultPanel: typeof import('./components/StreamResultPanel.vue')['default']
     ThreeColumnPage: typeof import('./components/layout/ThreeColumnPage.vue')['default']
   }
   export interface GlobalDirectives {

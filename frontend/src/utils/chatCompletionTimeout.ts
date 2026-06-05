@@ -8,7 +8,8 @@ export const CHAT_TIMEOUT_PER_MODEL_SECONDS = 80
 export const CHAT_TIMEOUT_MAX_SECONDS = 600
 
 /**
- * 根据被测模型数量计算 chat completion 超时（秒）。
+ * 根据被测模型数量计算 chat completion 空闲超时（秒）。
+ * 流式场景下指「连续无数据」的最长等待，非总时长；有 chunk 则重置计时。
  * 1 模型 120s，每多 1 模型 +80s，上限 600s。
  */
 export function computeAdaptiveChatTimeout(modelCount: number): number {

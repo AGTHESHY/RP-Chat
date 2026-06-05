@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   deleteBrainAnalysis,
@@ -11,7 +11,7 @@ import {
   listRpEvaluations,
   listRpHistory,
   listVersions,
-  runChatCompletion,
+  streamChatCompletion,
   saveBrainAnalysis,
   type BrainAnalysisDetail,
   type BrainAnalysisSummary,
@@ -22,6 +22,7 @@ import {
 } from '../api'
 import ApiRuntimePicker from '../components/ApiRuntimePicker.vue'
 import BrainResultView from '../components/BrainResultView.vue'
+import StreamResultPanel from '../components/StreamResultPanel.vue'
 import ThreeColumnPage from '../components/layout/ThreeColumnPage.vue'
 import AppPanel from '../components/layout/AppPanel.vue'
 import FilterBar from '../components/layout/FilterBar.vue'
@@ -85,6 +86,10 @@ const selectedBrainId = ref<number | null>(null)
 const selectedBrainDetail = ref<BrainAnalysisDetail | null>(null)
 
 const currentRaw = ref('')
+const currentReasoning = ref('')
+const streaming = ref(false)
+const streamPanelActive = ref(false)
+let streamAbort: AbortController | null = null
 const currentParsed = ref<BrainParsed | null>(null)
 const viewingBrainRecord = ref(false)
 
@@ -125,6 +130,14 @@ const linkedEvalLabel = computed(() => {
 const canRunBrain = computed(
   () => Boolean(selectedEvalId.value && selectedEvalDetail.value && resolvedRequest.value),
 )
+
+const runtimeParamsHidden = computed(
+  () => analyzing.value || streaming.value || streamPanelActive.value,
+)
+
+function showRuntimeParamsAgain() {
+  streamPanelActive.value = false
+}
 
 const selectedEvalModeLabel = computed(() => {
   const detail = selectedEvalDetail.value
@@ -172,6 +185,9 @@ watch(selectedRpHistoryKey, () => {
   selectedBrainId.value = null
   selectedBrainDetail.value = null
   currentRaw.value = ''
+  currentReasoning.value = ''
+  streaming.value = false
+  streamPanelActive.value = false
   currentParsed.value = null
   viewingBrainRecord.value = false
   void (async () => {
@@ -314,6 +330,9 @@ async function selectEvalRow(row: RpEvalSummary) {
   selectedBrainId.value = null
   selectedBrainDetail.value = null
   viewingBrainRecord.value = false
+  streaming.value = false
+  streamPanelActive.value = false
+  currentReasoning.value = ''
   currentRaw.value = ''
   currentParsed.value = null
   evalVersionContexts.value = {}
@@ -335,6 +354,9 @@ async function selectBrainRow(row: BrainAnalysisSummary) {
   historyTab.value = 'brain'
   selectedBrainId.value = row.id
   viewingBrainRecord.value = true
+  streaming.value = false
+  streamPanelActive.value = false
+  currentReasoning.value = ''
   try {
     const detail = await getBrainAnalysis(row.id)
     selectedBrainDetail.value = detail
@@ -420,8 +442,19 @@ async function handleRunBrain() {
     ElMessage.warning('测评 JSON 不完整，智脑可能无法给出模型对比建议')
   }
   analyzing.value = true
+  streaming.value = true
+  streamPanelActive.value = true
+  viewingBrainRecord.value = false
   currentRaw.value = ''
+  currentReasoning.value = ''
   currentParsed.value = null
+
+  const evaluatedModelCount = Math.max(
+    1,
+    evalDetail.evaluated_models?.length ?? (evalMode === 'multi_compare' ? 2 : 1),
+  )
+  const timeoutSeconds = computeAdaptiveChatTimeout(evaluatedModelCount)
+  streamAbort = new AbortController()
 
   try {
     const versionCatalog = await listVersions()
@@ -431,35 +464,50 @@ async function handleRunBrain() {
       ...DEEPSEEK_JSON_OUTPUT_EXTRA,
     }
 
-    const evaluatedModelCount = Math.max(
-      1,
-      evalDetail.evaluated_models?.length ??
-        (evalMode === 'multi_compare' ? 2 : 1),
+    const resp = await streamChatCompletion(
+      {
+        base_url: requestConfig.base_url,
+        api_key: requestConfig.api_key,
+        model: requestConfig.model,
+        temperature: requestConfig.temperature,
+        top_k: requestConfig.top_k ?? null,
+        extra_body: extra,
+        system_prompt: brainSystemPrompt.value,
+        user_content: userContent,
+        timeout_seconds: timeoutSeconds,
+        max_completion_tokens: computeAdaptiveMaxCompletionTokens(evaluatedModelCount),
+      },
+      {
+        onContent: (_piece, full) => {
+          currentRaw.value = full
+        },
+        onReasoning: (_piece, full) => {
+          currentReasoning.value = full
+        },
+      },
+      streamAbort.signal,
     )
-    const resp = await runChatCompletion({
-      base_url: requestConfig.base_url,
-      api_key: requestConfig.api_key,
-      model: requestConfig.model,
-      temperature: requestConfig.temperature,
-      top_k: requestConfig.top_k ?? null,
-      extra_body: extra,
-      system_prompt: brainSystemPrompt.value,
-      user_content: userContent,
-      timeout_seconds: computeAdaptiveChatTimeout(evaluatedModelCount),
-      max_completion_tokens: computeAdaptiveMaxCompletionTokens(evaluatedModelCount),
-    })
 
-    const raw = resp.raw_content || resp.error || resp.raw_text || ''
+    const raw = resp.raw_content || resp.error || ''
     currentRaw.value = raw
 
     if (resp.status !== 200) {
-      ElMessage.error(`智脑请求失败: HTTP ${resp.status}`)
+      const errDetail = (resp.error || '').trim().slice(0, 240)
+      ElMessage.error(
+        errDetail
+          ? `智脑请求失败: HTTP ${resp.status} — ${errDetail}`
+          : `智脑请求失败: HTTP ${resp.status}`,
+      )
+      streaming.value = false
+      streamPanelActive.value = false
       return
     }
 
     const parsed = parseBrainJson(raw)
     if (!parsed.ok || !parsed.data) {
       ElMessage.warning(parsed.error || '智脑 JSON 解析失败')
+      streaming.value = false
+      streamPanelActive.value = false
       return
     }
     currentParsed.value = parsed.data
@@ -488,10 +536,18 @@ async function handleRunBrain() {
     await loadBrainHistory()
     selectedBrainId.value = saved.id
     historyTab.value = 'brain'
+    streaming.value = false
     ElMessage.success('智脑分析完成并已保存')
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '智脑分析失败')
+    streaming.value = false
+    streamPanelActive.value = false
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      ElMessage.error(`智脑分析超时（连续 ${timeoutSeconds}s 无数据），请重试`)
+    } else {
+      ElMessage.error(error instanceof Error ? error.message : '智脑分析失败')
+    }
   } finally {
+    streamAbort = null
     analyzing.value = false
   }
 }
@@ -499,6 +555,11 @@ async function handleRunBrain() {
 onMounted(async () => {
   syncWithRegistry()
   await loadRpHistoryList()
+})
+
+onUnmounted(() => {
+  streamAbort?.abort()
+  streamAbort = null
 })
 </script>
 
@@ -714,34 +775,42 @@ onMounted(async () => {
         </template>
         <div
           class="test-panel-body"
-          :class="{ 'test-panel-body--preview': viewingBrainRecord }"
+          :class="{ 'test-panel-body--preview': viewingBrainRecord || runtimeParamsHidden }"
         >
-          <el-form v-if="!viewingBrainRecord" label-width="88px" class="test-form">
-            <RuntimeParamsFields
-              :temperature="runtime.temperature"
-              :top-k="runtime.top_k"
-              @update:temperature="runtime.temperature = $event"
-              @update:top-k="runtime.top_k = $event"
-            />
-            <el-form-item label=" " class="action-row">
-              <el-button
-                type="primary"
-                :loading="analyzing"
-                :disabled="!canRunBrain"
-                @click="handleRunBrain"
-              >
-                开始分析
-              </el-button>
-            </el-form-item>
-          </el-form>
+          <Transition name="params-collapse">
+            <el-form
+              v-if="!viewingBrainRecord && !runtimeParamsHidden"
+              label-width="88px"
+              class="test-form"
+            >
+              <RuntimeParamsFields
+                :temperature="runtime.temperature"
+                :top-k="runtime.top_k"
+                @update:temperature="runtime.temperature = $event"
+                @update:top-k="runtime.top_k = $event"
+              />
+              <el-form-item label=" " class="action-row">
+                <el-button
+                  type="primary"
+                  :loading="analyzing"
+                  :disabled="!canRunBrain"
+                  @click="handleRunBrain"
+                >
+                  开始分析
+                </el-button>
+              </el-form-item>
+            </el-form>
+          </Transition>
 
-          <div v-if="currentParsed" class="result-block">
+          <div v-if="streamPanelActive || currentParsed" class="result-block">
             <div class="result-title-row">
               <span class="result-title">
                 {{
-                  viewingBrainRecord && selectedBrainId
-                    ? `智脑记录 #${selectedBrainId}`
-                    : '版本更迭建议'
+                  streaming
+                    ? '智脑分析生成中'
+                    : viewingBrainRecord && selectedBrainId
+                      ? `智脑记录 #${selectedBrainId}`
+                      : '版本更迭建议'
                 }}
               </span>
               <div
@@ -760,9 +829,27 @@ onMounted(async () => {
                   <span class="record-meta-value">{{ brainRecordTopK }}</span>
                 </span>
               </div>
+              <el-button
+                v-else-if="runtimeParamsHidden && !streaming && !analyzing"
+                link
+                type="primary"
+                size="small"
+                @click="showRuntimeParamsAgain"
+              >
+                重新分析
+              </el-button>
             </div>
-            <el-scrollbar class="result-scroll">
-              <BrainResultView :parsed="currentParsed" />
+            <StreamResultPanel
+              v-if="streamPanelActive"
+              class="result-scroll"
+              :streaming="streaming"
+              :content="currentRaw"
+              :reasoning="currentReasoning"
+            >
+              <BrainResultView v-if="currentParsed" :parsed="currentParsed" />
+            </StreamResultPanel>
+            <el-scrollbar v-else class="result-scroll">
+              <BrainResultView v-if="currentParsed" :parsed="currentParsed" />
             </el-scrollbar>
           </div>
           <el-empty
@@ -802,6 +889,44 @@ onMounted(async () => {
 
 .test-panel-body--preview .result-block {
   padding-top: 14px;
+}
+
+.params-collapse-leave-active {
+  transition:
+    opacity 0.35s ease,
+    max-height 0.5s cubic-bezier(0.4, 0, 0.2, 1),
+    margin 0.5s cubic-bezier(0.4, 0, 0.2, 1),
+    padding 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
+}
+
+.params-collapse-leave-from {
+  opacity: 1;
+  max-height: 140px;
+}
+
+.params-collapse-leave-to {
+  opacity: 0;
+  max-height: 0;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.params-collapse-enter-active {
+  transition:
+    opacity 0.4s ease 0.08s,
+    max-height 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
+}
+
+.params-collapse-enter-from {
+  opacity: 0;
+  max-height: 0;
+}
+
+.params-collapse-enter-to {
+  opacity: 1;
+  max-height: 140px;
 }
 
 .result-block {
