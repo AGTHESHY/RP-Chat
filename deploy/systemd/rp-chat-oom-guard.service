@@ -1,0 +1,16 @@
+[Unit]
+Description=RP-Chat OOM guard (stop docker stack and restart SSH on OOM)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@PROJECT_ROOT@
+ExecStart=/bin/bash @PROJECT_ROOT@/scripts/oom-guard.sh
+Restart=always
+RestartSec=10
+# 需 root 权限停止容器并重启 ssh
+User=root
+
+[Install]
+WantedBy=multi-user.target

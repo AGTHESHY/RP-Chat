@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
-# 低内存环境（如 2GB Ubuntu）串行启动 Docker 服务，避免 mysql + redis 同时拉起导致 OOM。
+# 低内存环境串行构建并启动全栈：MySQL → Redis → Backend → Frontend
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT_DIR"
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/compose.sh"
 
-COMPOSE=(docker compose -f docker-compose.yml)
-if [[ -f docker-compose.lowmem.yml ]]; then
-  COMPOSE+=(-f docker-compose.lowmem.yml)
-fi
+BUILD="${BUILD:-1}"
 
 wait_healthy() {
   local container="$1"
@@ -36,14 +33,30 @@ wait_healthy() {
   return 1
 }
 
-echo "==> 1/2 启动 MySQL"
+if [[ "$BUILD" == "1" ]]; then
+  echo "==> 构建 backend 镜像"
+  "${COMPOSE[@]}" build backend
+  echo "==> 构建 frontend 镜像"
+  "${COMPOSE[@]}" build frontend
+fi
+
+echo "==> 1/4 启动 MySQL"
 "${COMPOSE[@]}" up -d mysql
 wait_healthy rp-chat-mysql 240
 
-echo "==> 2/2 启动 Redis"
+echo "==> 2/4 启动 Redis"
 "${COMPOSE[@]}" up -d redis
 wait_healthy rp-chat-redis 60
 
+echo "==> 3/4 启动 Backend"
+"${COMPOSE[@]}" up -d backend
+wait_healthy rp-chat-backend 180
+
+echo "==> 4/4 启动 Frontend"
+"${COMPOSE[@]}" up -d frontend
+wait_healthy rp-chat-frontend 60
+
 echo ""
-echo "全部服务已串行启动完成："
+echo "全部服务已串行启动完成。"
+echo "访问: http://<服务器IP>:8080"
 "${COMPOSE[@]}" ps
