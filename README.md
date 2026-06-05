@@ -19,13 +19,15 @@ Vue 3 + FastAPI 全栈应用，用于浏览 v1/v2 提示词、查看版本文档
 
 最终 System Prompt = SFW + NSFW 拼接；测试页可开关 NSFW 段落。
 
-| 配置 | 默认值 |
-|------|--------|
-| Host | `127.0.0.1` |
-| Port | `3306` |
-| User | `root` |
-| Password | `root123` |
-| Database | `rp_chat` |
+
+| 配置       | 默认值         |
+| -------- | ----------- |
+| Host     | `127.0.0.1` |
+| Port     | `3306`      |
+| User     | （自己设置）      |
+| Password | （自己设置）      |
+| Database | `rp_chat`   |
+
 
 可通过环境变量覆盖：`MYSQL_HOST`、`MYSQL_PORT`、`MYSQL_USER`、`MYSQL_PASSWORD`、`MYSQL_DATABASE`。
 
@@ -97,7 +99,7 @@ npm install
 npm run dev
 ```
 
-浏览器打开 http://localhost:5173
+浏览器打开 [http://localhost:5173](http://localhost:5173)
 
 - **提示词管理**：切换 v1/v2，查看 MD 文档与 SP 正文
 - **测试用例**：「对话问答」选会话作为测试输入；「Prompt 用例」查看已保存的期望输出
@@ -108,12 +110,15 @@ API 配置保存在浏览器 `localStorage`，不会写入仓库。
 
 ## API 端点
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/versions/{version}/prompts/{type}/{lang}` | 获取版本提示词（MySQL） |
-| GET | `/api/versions/{version}/docs` | 获取版本 MD 文档 |
-| PUT | `/api/versions/{version}/docs` | 更新版本文档（草稿，写入 MySQL） |
-| GET | `/api/prompt-test-results` | 列出已保存的 Prompt 期望结果 |
-| GET | `/api/prompt-test-results/{id}` | 获取期望结果详情 |
-| POST | `/api/prompt-test-results` | 保存测试期望结果 |
-| POST | `/api/chat/completions` | 代理 OpenAI 兼容 Chat API |
+
+| 方法   | 路径                                              | 说明                    |
+| ---- | ----------------------------------------------- | --------------------- |
+| GET  | `/api/versions/{version}/prompts/{type}/{lang}` | 获取版本提示词（MySQL）        |
+| GET  | `/api/versions/{version}/docs`                  | 获取版本 MD 文档            |
+| PUT  | `/api/versions/{version}/docs`                  | 更新版本文档（草稿，写入 MySQL）   |
+| GET  | `/api/prompt-test-results`                      | 列出已保存的 Prompt 期望结果    |
+| GET  | `/api/prompt-test-results/{id}`                 | 获取期望结果详情              |
+| POST | `/api/prompt-test-results`                      | 保存测试期望结果              |
+| POST | `/api/chat/completions`                         | 代理 OpenAI 兼容 Chat API |
+
+
