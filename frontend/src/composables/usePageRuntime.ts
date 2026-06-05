@@ -72,7 +72,10 @@ function createPageRuntime(scope: RuntimeScope) {
 
   const currentProfile = computed(() => getProfile(runtime.value.apiProfileId) ?? null)
 
-  const availableModels = computed(() => currentProfile.value?.models ?? [])
+  const availableModels = computed(() => {
+    const models = currentProfile.value?.models ?? []
+    return [...models].sort((a, b) => a.localeCompare(b))
+  })
 
   const selectedModelNames = computed(() => {
     const names = runtime.value.modelNames ?? []
