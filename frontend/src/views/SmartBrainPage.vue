@@ -220,9 +220,7 @@ function applyBrainStreamSnapshot(snap: BrainStreamSnapshot) {
   analyzing.value = snap.analyzing
   streamPanelActive.value = snap.streamPanelActive
   currentParsed.value = snap.parsed
-  if (snap.phase !== 'idle') {
-    viewingBrainRecord.value = snap.viewingBrainRecord
-  }
+  viewingBrainRecord.value = snap.viewingBrainRecord
   if (snap.savedBrainId != null && snap.evalId === evalId) {
     selectedBrainId.value = snap.savedBrainId
     historyTab.value = 'brain'

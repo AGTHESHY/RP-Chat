@@ -1,4 +1,9 @@
-import type { BrainAnalysisSummary, RpEvalSummary, RpHistoryDetail } from '../api'
+import type {
+  BrainAnalysisSummary,
+  RpEvalSummary,
+  RpHistoryDetail,
+  RpHistorySummary,
+} from '../api'
 import { formatHistoryTime } from './format'
 
 /** 与「RP测试历史」表格行数一致；无产出时显示 — */

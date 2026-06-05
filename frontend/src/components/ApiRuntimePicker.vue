@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import type { CheckboxValueType } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { formatApiDisplayUrl } from '../composables/useApiProfileRegistry'
 import { usePageRuntime } from '../composables/usePageRuntime'
@@ -59,8 +60,8 @@ function isModelChecked(model: string) {
   return selectedModelNames.value.includes(model)
 }
 
-function onModelCheckChange(model: string, checked: boolean) {
-  toggleModelSelection(model, checked)
+function onModelCheckChange(model: string, val: CheckboxValueType) {
+  toggleModelSelection(model, val === true)
 }
 </script>
 
@@ -107,7 +108,7 @@ function onModelCheckChange(model: string, checked: boolean) {
               v-for="model in availableModels"
               :key="model"
               :model-value="isModelChecked(model)"
-              @change="(val: boolean) => onModelCheckChange(model, val)"
+              @change="(val: CheckboxValueType) => onModelCheckChange(model, val)"
             >
               {{ model }}
             </el-checkbox>

@@ -40,13 +40,11 @@ const testRuntime = usePageRuntime('test')
 const {
   runtime,
   registry,
-  resolvedRequest,
   selectedModelNames,
   hasValidRuntime,
   setSelectedModels,
   resetToFirstModelSelection,
   syncWithRegistry,
-  persistRuntime,
   resolveRequestWithModelFallback,
 } = testRuntime
 const versionOptions = ref<string[]>(['v1', 'v2'])

@@ -1,16 +1,23 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import type { CheckboxValueType } from 'element-plus'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { deleteRpHistoryModels } from '../api'
 import type { RpHistoryDetail, RpHistoryModelRun } from '../api'
 import { formatHistoryTime } from '../utils/format'
 
-const props = defineProps<{
-  detail: RpHistoryDetail | null
-  loading?: boolean
-  checkedModels: string[]
-  compact?: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    detail: RpHistoryDetail | null
+    loading?: boolean
+    checkedModels: string[]
+    compact?: boolean
+  }>(),
+  {
+    loading: false,
+    compact: false,
+  },
+)
 
 const emit = defineEmits<{
   'update:checkedModels': [value: string[]]
@@ -18,6 +25,10 @@ const emit = defineEmits<{
 }>()
 
 const modelRuns = computed(() => props.detail?.model_runs ?? [])
+
+function asModelRun(row: unknown): RpHistoryModelRun {
+  return row as RpHistoryModelRun
+}
 
 function isModelRunEvaluable(run: RpHistoryModelRun): boolean {
   return Boolean(run.compress || run.merge)
@@ -27,8 +38,8 @@ function isModelRunChecked(run: RpHistoryModelRun): boolean {
   return props.checkedModels.includes(run.model)
 }
 
-function modelRunRowClassName({ row }: { row: RpHistoryModelRun }) {
-  return isModelRunChecked(row) ? 'rp-test-row--selected' : ''
+function modelRunRowClassName({ row }: { row: unknown }) {
+  return isModelRunChecked(asModelRun(row)) ? 'rp-test-row--selected' : ''
 }
 
 function toggleModelCheck(run: RpHistoryModelRun, checked: boolean) {
@@ -42,9 +53,14 @@ function toggleModelCheck(run: RpHistoryModelRun, checked: boolean) {
   emit('update:checkedModels', [...set])
 }
 
-function onModelRunRowClick(row: RpHistoryModelRun) {
-  if (!isModelRunEvaluable(row)) return
-  toggleModelCheck(row, !isModelRunChecked(row))
+function onModelRunRowClick(row: unknown) {
+  const run = asModelRun(row)
+  if (!isModelRunEvaluable(run)) return
+  toggleModelCheck(run, !isModelRunChecked(run))
+}
+
+function onModelRunCheckChange(row: unknown, val: CheckboxValueType) {
+  toggleModelCheck(asModelRun(row), val === true)
 }
 
 async function removeCheckedRecords() {
@@ -112,7 +128,7 @@ async function removeCheckedRecords() {
           class-name="col-nowrap"
         >
           <template #default="{ row }">
-            {{ row.compress ? '有' : '—' }}
+            {{ asModelRun(row).compress ? '有' : '—' }}
           </template>
         </el-table-column>
         <el-table-column
@@ -122,7 +138,7 @@ async function removeCheckedRecords() {
           class-name="col-nowrap"
         >
           <template #default="{ row }">
-            {{ row.merge ? '有' : '—' }}
+            {{ asModelRun(row).merge ? '有' : '—' }}
           </template>
         </el-table-column>
         <el-table-column
@@ -131,7 +147,7 @@ async function removeCheckedRecords() {
           class-name="col-nowrap"
         >
           <template #default="{ row }">
-            {{ formatHistoryTime(row.latest_updated_at) }}
+            {{ formatHistoryTime(asModelRun(row).latest_updated_at) }}
           </template>
         </el-table-column>
         <el-table-column
@@ -142,10 +158,10 @@ async function removeCheckedRecords() {
         >
           <template #default="{ row }">
             <el-checkbox
-              :model-value="isModelRunChecked(row)"
-              :disabled="!isModelRunEvaluable(row)"
+              :model-value="isModelRunChecked(asModelRun(row))"
+              :disabled="!isModelRunEvaluable(asModelRun(row))"
               @click.stop
-              @change="(v: boolean) => toggleModelCheck(row, v)"
+              @change="(val: CheckboxValueType) => onModelRunCheckChange(row, val)"
             />
           </template>
         </el-table-column>

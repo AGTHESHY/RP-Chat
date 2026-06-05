@@ -1,1 +1,0 @@
-import{m as t}from"./marked-DKjyhwJX.js";import{B as r,L as s,M as a,c}from"./vue-vendor-BiNzTayB.js";const m=["innerHTML"],_=r({__name:"MarkdownViewer",props:{content:{}},setup(e){const n=e,o=c(()=>t.parse(n.content||""));return(p,d)=>(s(),a("div",{class:"markdown-body",innerHTML:o.value},null,8,m))}});export{_ as default};
