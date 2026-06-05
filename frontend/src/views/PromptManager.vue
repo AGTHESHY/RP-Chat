@@ -18,7 +18,12 @@ import {
   type PromptType,
   type VersionMetaResponse,
 } from '../api'
-import { collectVersionSubtree, buildVersionTree, rootBaselineForVersion } from '../utils/versionTree'
+import {
+  collectVersionSubtree,
+  buildVersionTree,
+  rootBaselineForVersion,
+  type BaselineVersion,
+} from '../utils/versionTree'
 const MarkdownViewer = defineAsyncComponent(
   () => import('../components/MarkdownViewer.vue'),
 )
@@ -38,8 +43,9 @@ import { normalizeBaseUrl } from '../utils/apiConfigStorage'
 import { textsHaveDiff } from '../utils/textDiff'
 
 const route = useRoute()
-const baselineTab = ref<'v1' | 'v2'>('v2')
-const activeVersion = ref('v2')
+const baselineTab = ref('')
+const activeVersion = ref('')
+const availableBaselines = ref<string[]>([])
 const versionNodes = ref<{ version: string; base_version: string; status?: string }[]>([])
 const versionMeta = ref<VersionMetaResponse | null>(null)
 
@@ -79,12 +85,16 @@ const translateFromFallback = ref(!hasSavedTranslateConfig())
 let draftSaveTimer: ReturnType<typeof setTimeout> | null = null
 let skipAutoSave = false
 
-const baselineTabItems = [
-  { label: 'v1', name: 'v1' },
-  { label: 'v2', name: 'v2' },
-]
+const baselineTabItems = computed(() =>
+  availableBaselines.value.map((version) => ({ label: version, name: version })),
+)
 
-const subVersionTree = computed(() => buildVersionTree(versionNodes.value, baselineTab.value))
+const defaultBaseline = computed(() => availableBaselines.value[0] ?? '')
+
+const subVersionTree = computed(() => {
+  if (!availableBaselines.value.includes(baselineTab.value)) return []
+  return buildVersionTree(versionNodes.value, baselineTab.value as BaselineVersion)
+})
 
 const createBaseVersionOptions = computed(() => {
   const seen = new Set<string>()
@@ -95,11 +105,12 @@ const createBaseVersionOptions = computed(() => {
     options.push({ label, value })
   }
   const current = activeVersion.value
-  if (current !== 'v1' && current !== 'v2') {
+  if (current && !availableBaselines.value.includes(current)) {
     add(current, current)
   }
-  add('v1', 'v1')
-  add('v2', 'v2')
+  for (const baseline of availableBaselines.value) {
+    add(baseline, baseline)
+  }
   add('不选择', '')
   return options
 })
@@ -110,7 +121,7 @@ const promptPartItems = [
   { label: '拼接预览', name: 'preview' },
 ]
 
-const isBaselineVersion = (version: string) => version === 'v1' || version === 'v2'
+const isBaselineVersion = (version: string) => availableBaselines.value.includes(version)
 
 const isBaseline = computed(
   () => versionMeta.value?.is_baseline ?? isBaselineVersion(activeVersion.value),
@@ -232,22 +243,34 @@ async function persistDraft(payload: {
 async function refreshVersionList() {
   try {
     const data = await listVersions()
+    availableBaselines.value = [...data.baselines]
     versionNodes.value = [...data.custom, ...data.drafts].map((item) => ({
       version: item.version,
       base_version: item.base_version,
       status: item.status,
     }))
+    if (availableBaselines.value.length === 0) {
+      activeVersion.value = ''
+      baselineTab.value = ''
+      return
+    }
+    if (!availableBaselines.value.includes(baselineTab.value)) {
+      baselineTab.value = defaultBaseline.value
+    }
+    if (
+      !activeVersion.value ||
+      (isBaselineVersion(activeVersion.value) &&
+        !availableBaselines.value.includes(activeVersion.value))
+    ) {
+      activeVersion.value = baselineTab.value
+    }
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '加载版本列表失败')
   }
 }
 
-function onSubVersionSelect(node: { version: string }) {
-  activeVersion.value = node.version
-}
-
 function onBaselineTabClick(tab: string) {
-  if (tab !== 'v1' && tab !== 'v2') return
+  if (!availableBaselines.value.includes(tab)) return
   baselineTab.value = tab
   activeVersion.value = tab
 }
@@ -256,7 +279,21 @@ function renderTreeNodeLabel(data: { version: string; status?: string }) {
   return data.status === 'draft' ? `${data.version}（草稿）` : data.version
 }
 
+function onSubVersionSelect(node: { version: string }) {
+  activeVersion.value = node.version
+}
+
 async function loadVersionData() {
+  if (!activeVersion.value) {
+    versionMeta.value = null
+    docContent.value = ''
+    docFilename.value = ''
+    baselineSfw.value = ''
+    baselineNsfw.value = ''
+    editSfw.value = ''
+    editNsfw.value = ''
+    return
+  }
   loading.value = true
   skipAutoSave = true
   try {
@@ -317,14 +354,15 @@ watch(baselineTab, (tab) => {
 })
 
 watch(activeVersion, (version) => {
-  if (version === 'v1' || version === 'v2') {
+  if (availableBaselines.value.includes(version)) {
     if (baselineTab.value !== version) {
       baselineTab.value = version
     }
     return
   }
-  const root = rootBaselineForVersion(versionNodes.value, version, baselineTab.value)
-  if (baselineTab.value !== root) {
+  const fallback = (defaultBaseline.value || 'v2') as BaselineVersion
+  const root = rootBaselineForVersion(versionNodes.value, version, fallback)
+  if (availableBaselines.value.includes(root) && baselineTab.value !== root) {
     baselineTab.value = root
   }
 })
@@ -372,8 +410,8 @@ async function confirmCreateVersion() {
     ElMessage.warning('版本名以字母开头，仅允许字母、数字和下划线')
     return
   }
-  if (version === 'v1' || version === 'v2') {
-    ElMessage.warning('v1 / v2 为只读基线，请使用其他版本名')
+  if (availableBaselines.value.includes(version)) {
+    ElMessage.warning(`${version} 为只读基线，请使用其他版本名`)
     return
   }
   try {
@@ -435,7 +473,7 @@ async function discardCurrentDraft() {
     })
     await discardDraft(activeVersion.value)
     await refreshVersionList()
-    activeVersion.value = baseVersion.value || 'v2'
+    activeVersion.value = baseVersion.value || defaultBaseline.value
     ElMessage.success('草稿已丢弃')
   } catch {
     // cancelled
@@ -444,7 +482,7 @@ async function discardCurrentDraft() {
 
 async function confirmDeleteVersion() {
   if (isBaseline.value) {
-    ElMessage.warning('基线版本 v1 / v2 不可删除')
+    ElMessage.warning('基线版本不可删除')
     return
   }
   const targets = collectVersionSubtree(versionNodes.value, activeVersion.value)
@@ -459,10 +497,13 @@ async function confirmDeleteVersion() {
       confirmButtonText: '删除',
       confirmButtonClass: 'el-button--danger',
     })
-    const fallback = baseVersion.value || 'v2'
+    const fallback = baseVersion.value || defaultBaseline.value
     const result = await deleteVersion(activeVersion.value)
     await refreshVersionList()
-    activeVersion.value = fallback === 'v1' || fallback === 'v2' ? fallback : rootBaselineForVersion(versionNodes.value, fallback, 'v2')
+    const fallbackBaseline = (defaultBaseline.value || 'v2') as BaselineVersion
+    activeVersion.value = isBaselineVersion(fallback)
+      ? fallback
+      : rootBaselineForVersion(versionNodes.value, fallback, fallbackBaseline)
     const count = result.deleted.length
     ElMessage.success(count > 1 ? `已删除 ${count} 个版本` : '版本已删除')
   } catch (error) {
@@ -483,10 +524,11 @@ onMounted(async () => {
   const queryVersion = typeof route.query.version === 'string' ? route.query.version.trim() : ''
   if (queryVersion) {
     activeVersion.value = queryVersion
-    const root = rootBaselineForVersion(versionNodes.value, queryVersion)
-    if (root === 'v1' || root === 'v2') {
+    const fallback = (defaultBaseline.value || 'v2') as BaselineVersion
+    const root = rootBaselineForVersion(versionNodes.value, queryVersion, fallback)
+    if (availableBaselines.value.includes(root)) {
       baselineTab.value = root
-    } else if (queryVersion === 'v1' || queryVersion === 'v2') {
+    } else if (availableBaselines.value.includes(queryVersion)) {
       baselineTab.value = queryVersion
     }
   }
@@ -518,10 +560,17 @@ onMounted(async () => {
             </div>
           </div>
           <AdaptiveTabs
+            v-if="baselineTabItems.length"
             v-model="baselineTab"
             :items="baselineTabItems"
             layout="stretch"
             @tab-click="onBaselineTabClick"
+          />
+          <el-empty
+            v-else
+            description="暂无基线版本"
+            :image-size="64"
+            class="baseline-empty"
           />
 
           <div v-if="subVersionTree.length" class="sub-version-panel">
@@ -826,7 +875,9 @@ onMounted(async () => {
             v-model="createVersionName"
             placeholder="如 v3、v3_myedit、v2_myedit"
           />
-          <p class="dialog-hint">以字母开头，仅允许 [a-zA-Z0-9_]，不可使用 v1 / v2</p>
+          <p class="dialog-hint">
+            以字母开头，仅允许 [a-zA-Z0-9_]<template v-if="availableBaselines.length">，不可使用 {{ availableBaselines.join(' / ') }}</template>
+          </p>
         </el-form-item>
         <el-form-item label="基线版本">
           <el-radio-group v-model="createBaseVersion">

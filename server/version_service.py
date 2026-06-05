@@ -146,7 +146,13 @@ def _load_mysql_prompt(db: Session, version: str, prompt_type: str, lang: str) -
 
 
 def list_versions(db: Session) -> dict[str, Any]:
-    baselines = ["v1", "v2"]
+    baseline_rows = (
+        db.query(PromptVersion)
+        .filter(PromptVersion.is_baseline.is_(True), PromptVersion.status == "committed")
+        .order_by(PromptVersion.version)
+        .all()
+    )
+    baselines = [row.version for row in baseline_rows]
     custom_rows = (
         db.query(PromptVersion)
         .filter(PromptVersion.is_baseline.is_(False), PromptVersion.status == "committed")
