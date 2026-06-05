@@ -17,3 +17,7 @@ DRAFT_KEY_PREFIX = "rpchat:draft:"
 BRAIN_KEY_PREFIX = "rpchat:brain:"
 # 智脑历史默认 3 天过期；设为 0 则永不过期
 REDIS_BRAIN_TTL_SECONDS = int(os.getenv("REDIS_BRAIN_TTL_SECONDS", str(3 * 24 * 3600)))
+# 流式会话暂存默认 1 小时；设为 0 则永不过期
+REDIS_STREAM_TTL_SECONDS = int(os.getenv("REDIS_STREAM_TTL_SECONDS", str(3600)))
+STREAM_KEY_PREFIX = "rpchat:stream:"
+STREAM_ACTIVE_PREFIX = "rpchat:stream:active:"

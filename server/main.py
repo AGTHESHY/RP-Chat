@@ -30,6 +30,12 @@ from brain_service import (
     get_brain_analysis,
     list_brain_analyses,
 )
+from stream_session_service import (
+    create_stream_session,
+    get_active_stream_session,
+    get_stream_session,
+    patch_stream_session,
+)
 from rp_eval_service import (
     RpEvalSaveRequest,
     create_rp_eval,
@@ -664,6 +670,53 @@ def api_create_brain_analysis(body: BrainSaveRequest) -> dict[str, Any]:
 @app.delete("/api/brain-analyses/{record_id}")
 def api_delete_brain_analysis(record_id: int) -> dict[str, Any]:
     return delete_brain_analysis(record_id)
+
+
+class StreamSessionCreate(BaseModel):
+    scope: str = Field(min_length=1, max_length=64)
+    task_key: str = Field(min_length=1, max_length=256)
+    meta: dict[str, Any] = Field(default_factory=dict)
+
+
+class StreamSessionPatch(BaseModel):
+    raw_content: Optional[str] = None
+    reasoning_content: Optional[str] = None
+    status: Optional[str] = None
+    error: Optional[str] = None
+    parsed_result: Optional[dict[str, Any]] = None
+
+
+@app.post("/api/stream-sessions")
+def api_create_stream_session(body: StreamSessionCreate) -> dict[str, Any]:
+    return create_stream_session(body.scope, body.task_key, body.meta)
+
+
+@app.patch("/api/stream-sessions/{session_id}")
+def api_patch_stream_session(session_id: str, body: StreamSessionPatch) -> dict[str, Any]:
+    patch = body.model_dump(exclude_none=True)
+    try:
+        return patch_stream_session(session_id, patch)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/stream-sessions/{session_id}")
+def api_get_stream_session(session_id: str) -> dict[str, Any]:
+    data = get_stream_session(session_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="stream session not found")
+    return data
+
+
+@app.get("/api/stream-sessions/active")
+def api_get_active_stream_session(
+    scope: str = Query(..., min_length=1),
+    task_key: str = Query(..., min_length=1),
+) -> dict[str, Any]:
+    data = get_active_stream_session(scope, task_key)
+    if not data:
+        raise HTTPException(status_code=404, detail="active stream session not found")
+    return data
 
 
 def _build_chat_payload(body: ChatCompletionRequest) -> dict[str, Any]:

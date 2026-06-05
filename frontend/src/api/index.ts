@@ -990,3 +990,61 @@ export function deleteBrainAnalysis(id: number) {
     { method: 'DELETE' },
   )
 }
+
+export type StreamSessionStatus = 'running' | 'done' | 'error' | 'cancelled'
+
+export interface StreamSession {
+  id: string
+  scope: string
+  task_key: string
+  status: StreamSessionStatus
+  raw_content: string
+  reasoning_content: string
+  meta: Record<string, unknown>
+  error: string
+  created_at: string
+  updated_at: string
+  parsed_result?: Record<string, unknown>
+}
+
+export function createStreamSession(body: {
+  scope: string
+  task_key: string
+  meta?: Record<string, unknown>
+}) {
+  return request<StreamSession>('/api/stream-sessions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+export function patchStreamSession(
+  sessionId: string,
+  patch: {
+    raw_content?: string
+    reasoning_content?: string
+    status?: StreamSessionStatus
+    error?: string
+    parsed_result?: Record<string, unknown>
+  },
+) {
+  return request<StreamSession>(`/api/stream-sessions/${sessionId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+}
+
+export function getStreamSession(sessionId: string) {
+  return request<StreamSession>(`/api/stream-sessions/${sessionId}`)
+}
+
+export async function getActiveStreamSession(scope: string, taskKey: string) {
+  const search = new URLSearchParams({ scope, task_key: taskKey })
+  try {
+    return await request<StreamSession>(`/api/stream-sessions/active?${search.toString()}`)
+  } catch {
+    return null
+  }
+}

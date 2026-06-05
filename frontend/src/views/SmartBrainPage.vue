@@ -11,8 +11,7 @@ import {
   listRpEvaluations,
   listRpHistory,
   listVersions,
-  streamChatCompletion,
-  saveBrainAnalysis,
+  getStreamSession,
   type BrainAnalysisDetail,
   type BrainAnalysisSummary,
   type RpEvalDetail,
@@ -28,12 +27,7 @@ import AppPanel from '../components/layout/AppPanel.vue'
 import FilterBar from '../components/layout/FilterBar.vue'
 import RuntimeParamsFields from '../components/RuntimeParamsFields.vue'
 import { usePageRuntime } from '../composables/usePageRuntime'
-import { DEEPSEEK_JSON_OUTPUT_EXTRA } from '../utils/apiProfileStorage'
-import {
-  computeAdaptiveChatTimeout,
-  computeAdaptiveMaxCompletionTokens,
-} from '../utils/chatCompletionTimeout'
-import { buildBrainUserPayload, hasMultiModelEvalDimensions } from '../utils/brainPayload'
+import { hasMultiModelEvalDimensions } from '../utils/brainPayload'
 import {
   buildVersionContext,
   formatVersionKindLabel,
@@ -65,6 +59,17 @@ import {
   filterBrainAnalysesForTask,
   filterEvaluationsForTask,
 } from '../utils/rpTaskMatch'
+import {
+  attachBrainStream,
+  brainStreamActiveForTask,
+  detachBrainStream,
+  getBrainStreamSnapshot,
+  recoverBrainStreamForTask,
+  runBrainStream,
+  setBrainStreamHandlers,
+  subscribeBrainStream,
+  type BrainStreamSnapshot,
+} from '../services/brainStreamRunner'
 
 const brainRuntime = usePageRuntime('brain')
 const { runtime, resolvedRequest, syncWithRegistry } = brainRuntime
@@ -93,9 +98,9 @@ const currentRaw = ref('')
 const currentReasoning = ref('')
 const streaming = ref(false)
 const streamPanelActive = ref(false)
-let streamAbort: AbortController | null = null
 const currentParsed = ref<BrainParsed | null>(null)
 const viewingBrainRecord = ref(false)
+let unsubscribeBrainStream: (() => void) | null = null
 
 const selectedEvalSummary = computed(
   () => evalHistory.value.find((item) => item.id === selectedEvalId.value) ?? null,
@@ -178,6 +183,52 @@ const selectedVersionKindLines = computed(() => {
   return lines
 })
 
+function streamMatchesCurrentTask(snap: BrainStreamSnapshot): boolean {
+  if (!snap.taskKey || !selectedRpHistoryKey.value) return false
+  return snap.taskKey === selectedRpHistoryKey.value
+}
+
+function clearStreamDisplay() {
+  currentRaw.value = ''
+  currentReasoning.value = ''
+  streaming.value = false
+  streamPanelActive.value = false
+  currentParsed.value = null
+  analyzing.value = false
+}
+
+function applyBrainStreamSnapshot(snap: BrainStreamSnapshot) {
+  if (snap.phase === 'idle') {
+    if (streamMatchesCurrentTask(snap)) {
+      clearStreamDisplay()
+    }
+    return
+  }
+  if (!streamMatchesCurrentTask(snap)) {
+    return
+  }
+  const evalId = selectedEvalId.value
+  if (snap.evalId != null && evalId != null && snap.evalId !== evalId) {
+    return
+  }
+  if (snap.evalId != null && evalId == null) {
+    return
+  }
+  currentRaw.value = snap.raw
+  currentReasoning.value = snap.reasoning
+  streaming.value = snap.phase === 'running'
+  analyzing.value = snap.analyzing
+  streamPanelActive.value = snap.streamPanelActive
+  currentParsed.value = snap.parsed
+  if (snap.phase !== 'idle') {
+    viewingBrainRecord.value = snap.viewingBrainRecord
+  }
+  if (snap.savedBrainId != null && snap.evalId === evalId) {
+    selectedBrainId.value = snap.savedBrainId
+    historyTab.value = 'brain'
+  }
+}
+
 watch(brainSystemPrompt, (text) => {
   saveBrainSystemPrompt(text)
 })
@@ -188,16 +239,13 @@ watch(selectedRpHistoryKey, () => {
   evalVersionContexts.value = {}
   selectedBrainId.value = null
   selectedBrainDetail.value = null
-  currentRaw.value = ''
-  currentReasoning.value = ''
-  streaming.value = false
-  streamPanelActive.value = false
-  currentParsed.value = null
   viewingBrainRecord.value = false
+  clearStreamDisplay()
   void (async () => {
     await syncRpHistorySelection(selectedRpHistoryKey.value)
     await loadEvalHistory()
     await loadBrainHistory()
+    await restoreStreamForCurrentTask()
   })()
 })
 
@@ -336,17 +384,20 @@ async function selectEvalRow(row: RpEvalSummary) {
   selectedEvalId.value = row.id
   selectedBrainId.value = null
   selectedBrainDetail.value = null
-  viewingBrainRecord.value = false
-  streaming.value = false
-  streamPanelActive.value = false
-  currentReasoning.value = ''
-  currentRaw.value = ''
-  currentParsed.value = null
+  const streamActive = brainStreamActiveForTask(selectedRpHistoryKey.value, row.id)
+  if (!streamActive) {
+    viewingBrainRecord.value = false
+    clearStreamDisplay()
+  }
   evalVersionContexts.value = {}
   try {
     const detail = await getRpEval(row.id)
     selectedEvalDetail.value = detail
     void loadEvalVersionContexts(detail)
+    if (streamActive) {
+      await recoverBrainStreamForTask(selectedRpHistoryKey.value, row.id)
+      applyBrainStreamSnapshot(getBrainStreamSnapshot())
+    }
   } catch (error) {
     selectedEvalDetail.value = null
     ElMessage.error(error instanceof Error ? error.message : '加载测评详情失败')
@@ -423,6 +474,43 @@ async function removeBrainRecord() {
   }
 }
 
+async function restoreStreamContextFromRedis() {
+  const storedId = sessionStorage.getItem('rpchat:brain-stream-session-id')
+  if (!storedId) return
+  try {
+    const session = await getStreamSession(storedId)
+    if (session.status !== 'running' && session.status !== 'done') return
+    const historyKey = session.meta?.history_key
+    if (typeof historyKey !== 'string' || !historyKey) return
+    const row = rpHistoryList.value.find((item) => item.history_key === historyKey)
+    if (row && row.history_key !== selectedRpHistoryKey.value) {
+      selectedRpHistoryKey.value = row.history_key
+      await syncRpHistorySelection(row.history_key)
+      await loadEvalHistory()
+      await loadBrainHistory()
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+async function restoreStreamForCurrentTask() {
+  const snap = getBrainStreamSnapshot()
+  if (!streamMatchesCurrentTask(snap) || snap.evalId == null || snap.phase === 'idle') {
+    return
+  }
+  const match = evalHistory.value.find((row) => row.id === snap.evalId)
+  if (!match) {
+    return
+  }
+  if (selectedEvalId.value !== snap.evalId) {
+    await selectEvalRow(match)
+    return
+  }
+  await recoverBrainStreamForTask(selectedRpHistoryKey.value, snap.evalId)
+  applyBrainStreamSnapshot(getBrainStreamSnapshot())
+}
+
 async function handleRunBrain() {
   if (!canRunBrain.value || !selectedEvalDetail.value) {
     if (!selectedEvalId.value) {
@@ -448,126 +536,63 @@ async function handleRunBrain() {
   ) {
     ElMessage.warning('测评 JSON 不完整，智脑可能无法给出模型对比建议')
   }
-  analyzing.value = true
-  streaming.value = true
-  streamPanelActive.value = true
-  viewingBrainRecord.value = false
-  currentRaw.value = ''
-  currentReasoning.value = ''
-  currentParsed.value = null
-
-  const evaluatedModelCount = Math.max(
-    1,
-    evalDetail.evaluated_models?.length ?? (evalMode === 'multi_compare' ? 2 : 1),
-  )
-  const timeoutSeconds = computeAdaptiveChatTimeout(evaluatedModelCount)
-  streamAbort = new AbortController()
 
   try {
     const versionCatalog = await listVersions()
-    const userContent = await buildBrainUserPayload({ evalDetail, versionCatalog })
-    const extra = {
-      ...(requestConfig.extra_body ?? {}),
-      ...DEEPSEEK_JSON_OUTPUT_EXTRA,
-    }
-
-    const resp = await streamChatCompletion(
-      {
-        base_url: requestConfig.base_url,
-        api_key: requestConfig.api_key,
-        model: requestConfig.model,
-        temperature: requestConfig.temperature,
-        top_k: requestConfig.top_k ?? null,
-        extra_body: extra,
-        system_prompt: brainSystemPrompt.value,
-        user_content: userContent,
-        timeout_seconds: timeoutSeconds,
-        max_completion_tokens: computeAdaptiveMaxCompletionTokens(evaluatedModelCount),
-      },
-      {
-        onContent: (_piece, full) => {
-          currentRaw.value = full
-        },
-        onReasoning: (_piece, full) => {
-          currentReasoning.value = full
-        },
-      },
-      streamAbort.signal,
-    )
-
-    const raw = resp.raw_content || resp.error || ''
-    currentRaw.value = raw
-
-    if (resp.status !== 200) {
-      const errDetail = (resp.error || '').trim().slice(0, 240)
-      ElMessage.error(
-        errDetail
-          ? `智脑请求失败: HTTP ${resp.status} — ${errDetail}`
-          : `智脑请求失败: HTTP ${resp.status}`,
-      )
-      streaming.value = false
-      streamPanelActive.value = false
+    const historyKey =
+      rpHistoryDetail.value?.history_key ?? selectedRpHistoryKey.value
+    if (!historyKey) {
+      ElMessage.warning('请先选择 RP 历史')
       return
     }
-
-    const parsed = parseBrainJson(raw)
-    if (!parsed.ok || !parsed.data) {
-      ElMessage.warning(parsed.error || '智脑 JSON 解析失败')
-      streaming.value = false
-      streamPanelActive.value = false
-      return
-    }
-    currentParsed.value = parsed.data
-    viewingBrainRecord.value = false
-
-    const saved = await saveBrainAnalysis({
-      rp_eval_id: evalDetail.id,
-      user_id: evalDetail.user_id,
-      role_id: evalDetail.role_id,
-      app_name: evalDetail.app_name,
-      role_name: evalDetail.role_name,
-      round_start: evalDetail.round_start,
-      round_end: evalDetail.round_end,
-      compress_prompt_version: evalDetail.compress_prompt_version,
-      merge_prompt_version: evalDetail.merge_prompt_version,
-      brain_system_prompt: brainSystemPrompt.value,
-      brain_result: JSON.parse(JSON.stringify(parsed.data)) as Record<string, unknown>,
-      raw_model_output: raw,
-      model: requestConfig.model,
-      top_k: requestConfig.top_k ?? null,
-      temperature: requestConfig.temperature,
-      eval_mode: evalMode,
-      evaluated_models: evalDetail.evaluated_models ?? [],
-      run_group_id: rpHistoryDetail.value?.run_group_id ?? evalDetail.run_group_id ?? 0,
+    await runBrainStream({
+      taskKey: historyKey,
+      evalDetail,
+      requestConfig,
+      brainSystemPrompt: brainSystemPrompt.value,
+      versionCatalog,
+      evalMode,
+      runGroupId: rpHistoryDetail.value?.run_group_id ?? evalDetail.run_group_id ?? 0,
     })
-
-    await loadBrainHistory()
-    selectedBrainId.value = saved.id
-    historyTab.value = 'brain'
-    streaming.value = false
-    ElMessage.success('智脑分析完成并已保存')
   } catch (error) {
-    streaming.value = false
-    streamPanelActive.value = false
-    if (error instanceof DOMException && error.name === 'AbortError') {
-      ElMessage.error(`智脑分析超时（连续 ${timeoutSeconds}s 无数据），请重试`)
-    } else {
-      ElMessage.error(error instanceof Error ? error.message : '智脑分析失败')
-    }
-  } finally {
-    streamAbort = null
-    analyzing.value = false
+    ElMessage.error(error instanceof Error ? error.message : '智脑分析失败')
   }
 }
 
 onMounted(async () => {
+  setBrainStreamHandlers({
+    onComplete: async (saved) => {
+      const snap = getBrainStreamSnapshot()
+      if (!streamMatchesCurrentTask(snap)) return
+      await loadBrainHistory()
+      selectedBrainId.value = saved.id
+      historyTab.value = 'brain'
+      ElMessage.success('智脑分析完成并已保存')
+    },
+    onError: (message) => {
+      const snap = getBrainStreamSnapshot()
+      if (!streamMatchesCurrentTask(snap)) return
+      ElMessage.error(message)
+    },
+  })
+  unsubscribeBrainStream = subscribeBrainStream(applyBrainStreamSnapshot)
+  attachBrainStream()
   syncWithRegistry()
   await loadRpHistoryList()
+  if (selectedRpHistoryKey.value) {
+    await syncRpHistorySelection(selectedRpHistoryKey.value)
+    await loadEvalHistory()
+    await loadBrainHistory()
+  }
+  await restoreStreamContextFromRedis()
+  await restoreStreamForCurrentTask()
 })
 
 onUnmounted(() => {
-  streamAbort?.abort()
-  streamAbort = null
+  unsubscribeBrainStream?.()
+  unsubscribeBrainStream = null
+  setBrainStreamHandlers({})
+  detachBrainStream()
 })
 </script>
 
