@@ -13,6 +13,7 @@ import {
   listVersions,
   runChatCompletion,
   saveBrainAnalysis,
+  type BrainAnalysisDetail,
   type BrainAnalysisSummary,
   type RpEvalDetail,
   type RpEvalSummary,
@@ -50,6 +51,7 @@ import {
 } from '../utils/parseRpEvalJson'
 import {
   formatBrainPromptVersions,
+  formatEvalHistoryLabel,
   formatEvaluatedModels,
   formatEvalPromptVersions,
 } from '../utils/rpEvalFormat'
@@ -76,6 +78,7 @@ const evalVersionContexts = ref<Record<string, BrainVersionContext>>({})
 const brainHistory = ref<BrainAnalysisSummary[]>([])
 const brainHistoryLoading = ref(false)
 const selectedBrainId = ref<number | null>(null)
+const selectedBrainDetail = ref<BrainAnalysisDetail | null>(null)
 
 const currentRaw = ref('')
 const currentParsed = ref<BrainParsed | null>(null)
@@ -88,6 +91,32 @@ const selectedEvalSummary = computed(
 const selectedBrainSummary = computed(
   () => brainHistory.value.find((item) => item.id === selectedBrainId.value) ?? null,
 )
+
+const brainRecordTemperature = computed(() => {
+  if (!viewingBrainRecord.value || !selectedBrainDetail.value) return null
+  const value = selectedBrainDetail.value.temperature
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+})
+
+const brainRecordTopK = computed(() => {
+  if (!viewingBrainRecord.value || !selectedBrainDetail.value) return null
+  const value = selectedBrainDetail.value.top_k
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+})
+
+const linkedEvalLabel = computed(() => {
+  const brain = selectedBrainSummary.value
+  if (!brain) return '—'
+  const evalRow =
+    selectedEvalSummary.value?.id === brain.rp_eval_id
+      ? selectedEvalSummary.value
+      : selectedEvalDetail.value?.id === brain.rp_eval_id
+        ? selectedEvalDetail.value
+        : (evalHistory.value.find((item) => item.id === brain.rp_eval_id) ?? null)
+  if (evalRow) return formatEvalHistoryLabel(evalRow)
+  const sp = formatBrainPromptVersions(brain)
+  return sp !== '—' ? `${sp}（#${brain.rp_eval_id}）` : `#${brain.rp_eval_id}`
+})
 
 const canRunBrain = computed(
   () => Boolean(selectedEvalId.value && selectedEvalDetail.value && resolvedRequest.value),
@@ -137,6 +166,7 @@ watch(selectedRpHistoryKey, () => {
   selectedEvalDetail.value = null
   evalVersionContexts.value = {}
   selectedBrainId.value = null
+  selectedBrainDetail.value = null
   currentRaw.value = ''
   currentParsed.value = null
   viewingBrainRecord.value = false
@@ -278,6 +308,7 @@ async function selectEvalRow(row: RpEvalSummary) {
   historyTab.value = 'eval'
   selectedEvalId.value = row.id
   selectedBrainId.value = null
+  selectedBrainDetail.value = null
   viewingBrainRecord.value = false
   currentRaw.value = ''
   currentParsed.value = null
@@ -302,16 +333,20 @@ async function selectBrainRow(row: BrainAnalysisSummary) {
   viewingBrainRecord.value = true
   try {
     const detail = await getBrainAnalysis(row.id)
+    selectedBrainDetail.value = detail
     currentRaw.value = detail.raw_model_output
     const parsed = parseBrainJson(JSON.stringify(detail.brain_result))
     currentParsed.value = parsed.ok ? parsed.data ?? null : null
-    if (evalHistory.value.some((e) => e.id === detail.rp_eval_id)) {
-      selectedEvalId.value = detail.rp_eval_id
+    selectedEvalId.value = detail.rp_eval_id
+    try {
       const evalDetail = await getRpEval(detail.rp_eval_id)
       selectedEvalDetail.value = evalDetail
       void loadEvalVersionContexts(evalDetail)
+    } catch {
+      selectedEvalDetail.value = null
     }
   } catch (error) {
+    selectedBrainDetail.value = null
     currentParsed.value = null
     ElMessage.error(error instanceof Error ? error.message : '加载智脑记录失败')
   }
@@ -344,6 +379,7 @@ async function removeBrainRecord() {
     await ElMessageBox.confirm('确定删除该条智脑分析记录？', '删除智脑', { type: 'warning' })
     await deleteBrainAnalysis(selectedBrainId.value)
     selectedBrainId.value = null
+    selectedBrainDetail.value = null
     viewingBrainRecord.value = false
     currentRaw.value = ''
     currentParsed.value = null
@@ -606,7 +642,7 @@ onMounted(async () => {
               />
             </el-form-item>
             <el-form-item v-if="selectedBrainSummary" label="关联测评">
-              <el-input :model-value="`#${selectedBrainSummary.rp_eval_id}`" disabled />
+              <el-input :model-value="linkedEvalLabel" disabled />
             </el-form-item>
             <el-form-item label="被测 SP">
               <el-input
@@ -665,8 +701,11 @@ onMounted(async () => {
           <span>智脑分析</span>
           <ApiRuntimePicker scope="brain" />
         </template>
-        <div class="test-panel-body">
-          <el-form label-width="88px" class="test-form">
+        <div
+          class="test-panel-body"
+          :class="{ 'test-panel-body--preview': viewingBrainRecord }"
+        >
+          <el-form v-if="!viewingBrainRecord" label-width="88px" class="test-form">
             <RuntimeParamsFields
               :temperature="runtime.temperature"
               :top-k="runtime.top_k"
@@ -686,12 +725,30 @@ onMounted(async () => {
           </el-form>
 
           <div v-if="currentParsed" class="result-block">
-            <div class="result-title">
-              {{
-                viewingBrainRecord && selectedBrainId
-                  ? `智脑记录 #${selectedBrainId}`
-                  : '版本更迭建议'
-              }}
+            <div class="result-title-row">
+              <span class="result-title">
+                {{
+                  viewingBrainRecord && selectedBrainId
+                    ? `智脑记录 #${selectedBrainId}`
+                    : '版本更迭建议'
+                }}
+              </span>
+              <div
+                v-if="viewingBrainRecord && (brainRecordTemperature !== null || brainRecordTopK !== null)"
+                class="result-meta-chips"
+              >
+                <span
+                  v-if="brainRecordTemperature !== null"
+                  class="record-meta-chip"
+                >
+                  <span class="record-meta-label">temperature</span>
+                  <span class="record-meta-value">{{ brainRecordTemperature }}</span>
+                </span>
+                <span v-if="brainRecordTopK !== null" class="record-meta-chip">
+                  <span class="record-meta-label">top_k</span>
+                  <span class="record-meta-value">{{ brainRecordTopK }}</span>
+                </span>
+              </div>
             </div>
             <el-scrollbar class="result-scroll">
               <BrainResultView :parsed="currentParsed" />
@@ -732,6 +789,10 @@ onMounted(async () => {
   justify-content: flex-end;
 }
 
+.test-panel-body--preview .result-block {
+  padding-top: 14px;
+}
+
 .result-block {
   flex: 1;
   min-height: 0;
@@ -741,10 +802,53 @@ onMounted(async () => {
   gap: 8px;
 }
 
+.result-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
 .result-title {
   font-size: 13px;
   font-weight: 600;
   flex-shrink: 0;
+}
+
+.result-meta-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.record-meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  background: #f4f4f5;
+  color: #606266;
+}
+
+.record-meta-label {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 400;
+  opacity: 0.72;
+}
+
+.record-meta-value {
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .result-scroll {

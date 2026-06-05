@@ -10,6 +10,7 @@ import {
   runChatCompletion,
   deleteRpEval,
   saveRpEval,
+  type RpEvalDetail,
   type RpEvalSummary,
   type RpHistoryDetail,
   type RpHistoryModelRun,
@@ -23,6 +24,7 @@ import FilterBar from '../components/layout/FilterBar.vue'
 import RuntimeParamsFields from '../components/RuntimeParamsFields.vue'
 import { formatConfidence, formatHistoryTime } from '../utils/format'
 import {
+  formatEvalHistoryLabel,
   formatEvalPromptVersions,
   formatEvaluatedModels,
   formatRpHistoryModelCount,
@@ -62,6 +64,8 @@ const evaluating = ref(false)
 const evalHistory = ref<RpEvalSummary[]>([])
 const evalHistoryLoading = ref(false)
 const selectedEvalId = ref<number | null>(null)
+const selectedEvalDetail = ref<RpEvalDetail | null>(null)
+const viewingEvalRecord = ref(false)
 const currentRaw = ref('')
 const currentParsed = ref<RpEvalParsed | null>(null)
 
@@ -167,12 +171,67 @@ const selectedEvalSummary = computed(
   () => evalHistory.value.find((item) => item.id === selectedEvalId.value) ?? null,
 )
 
+const evalRecordTemperature = computed(() => {
+  if (!viewingEvalRecord.value || !selectedEvalDetail.value) return null
+  const value = selectedEvalDetail.value.temperature
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+})
+
+const evalRecordTopK = computed(() => {
+  if (!viewingEvalRecord.value || !selectedEvalDetail.value) return null
+  const value = selectedEvalDetail.value.top_k
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+})
+
+const selectedEvalModeLabel = computed(() => {
+  const detail = selectedEvalDetail.value
+  const summary = selectedEvalSummary.value
+  const mode = detail?.eval_mode ?? summary?.eval_mode
+  if (mode === 'multi_compare') return '多模型对比'
+  if (mode === 'single') return '单模型'
+  const models = detail?.evaluated_models ?? summary?.evaluated_models ?? []
+  return models.length > 1 ? '多模型对比' : '单模型'
+})
+
+const selectedEvaluatedModelsLabel = computed(() => {
+  const models =
+    selectedEvalDetail.value?.evaluated_models ??
+    selectedEvalSummary.value?.evaluated_models ??
+    []
+  return formatEvaluatedModelsLabel(models)
+})
+
+const resultPromptVersions = computed(() => {
+  const summary = selectedEvalSummary.value
+  if (summary && selectedEvalId.value === summary.id) {
+    return formatEvalPromptVersions(summary)
+  }
+  const runs = selectedModelRuns.value
+  if (runs.length > 0) {
+    const parts: string[] = []
+    const compressVersion = runs.find((run) => run.compress)?.compress_run?.prompt_version
+    const mergeVersion = runs.find((run) => run.merge)?.merge_run?.prompt_version
+    if (compressVersion) parts.push(`C:${compressVersion}`)
+    if (mergeVersion) parts.push(`M:${mergeVersion}`)
+    return parts.join(' ') || '—'
+  }
+  return '—'
+})
+
 watch(evalSystemPrompt, (text) => {
   saveRpEvalSystemPrompt(text)
 })
 
+watch(historyTab, (tab) => {
+  if (tab === 'rp-test') {
+    viewingEvalRecord.value = false
+  }
+})
+
 watch(selectedRpHistoryKey, () => {
   selectedEvalId.value = null
+  selectedEvalDetail.value = null
+  viewingEvalRecord.value = false
   currentRaw.value = ''
   currentParsed.value = null
   void (async () => {
@@ -292,9 +351,11 @@ async function handleRunEval() {
   const modelRuns = selectedModelRuns.value
   const requestConfig = resolvedRequest.value!
   evaluating.value = true
+  viewingEvalRecord.value = false
   currentRaw.value = ''
   currentParsed.value = null
   selectedEvalId.value = null
+  selectedEvalDetail.value = null
 
   try {
     const conv = await getChatQaConversation({
@@ -369,13 +430,18 @@ async function handleRunEval() {
 }
 
 async function selectEvalRow(row: RpEvalSummary) {
+  historyTab.value = 'eval'
   selectedEvalId.value = row.id
+  viewingEvalRecord.value = true
   try {
     const detail = await getRpEval(row.id)
+    selectedEvalDetail.value = detail
     currentRaw.value = detail.raw_model_output
     const parsed = parseRpEvalJson(JSON.stringify(detail.eval_result))
     currentParsed.value = parsed.ok ? parsed.data ?? null : null
   } catch (error) {
+    selectedEvalDetail.value = null
+    currentParsed.value = null
     ElMessage.error(error instanceof Error ? error.message : '加载测评详情失败')
   }
 }
@@ -391,6 +457,8 @@ async function removeEvalRecord() {
     await ElMessageBox.confirm('确定删除该条测评记录？', '删除测评', { type: 'warning' })
     await deleteRpEval(selectedEvalId.value)
     selectedEvalId.value = null
+    selectedEvalDetail.value = null
+    viewingEvalRecord.value = false
     currentRaw.value = ''
     currentParsed.value = null
     await loadEvalHistory()
@@ -596,56 +664,92 @@ onUnmounted(() => {
           <el-button size="small" @click="handleResetPrompt">恢复默认</el-button>
         </template>
           <el-empty
-            v-if="!selectedRpHistoryKey"
-            description="请选择对话，并在「RP测试历史」中勾选要对比的模型"
+            v-if="!selectedRpHistoryKey && !selectedEvalSummary"
+            description="请选择对话，或在「测评历史」选择记录"
           />
           <el-form v-else label-width="88px" class="edit-form">
             <el-form-item label="角色">
-              <el-input :model-value="rpHistoryDetail?.role_name ?? '—'" disabled />
-            </el-form-item>
-            <el-form-item label="轮次">
               <el-input
                 :model-value="
-                  rpHistoryDetail
-                    ? `${rpHistoryDetail.round_start} - ${rpHistoryDetail.round_end}`
-                    : '—'
+                  selectedEvalDetail?.role_name ??
+                  selectedEvalSummary?.role_name ??
+                  rpHistoryDetail?.role_name ??
+                  '—'
                 "
                 disabled
               />
             </el-form-item>
-            <el-form-item label="SP 版本">
-              <el-input :model-value="rpHistoryDetail?.prompt_version ?? '—'" disabled />
-            </el-form-item>
-            <el-form-item label="对比模型">
-              <el-input
-                :model-value="formatEvaluatedModelsLabel(checkedEvalModels)"
-                disabled
-              />
-            </el-form-item>
-            <el-form-item label="被测产出">
-              <el-input
-                :model-value="
-                  selectedModelRuns.length
-                    ? selectedModelRuns
-                        .map(
-                          (run) =>
-                            `${run.model}: ${
-                              [
-                                run.compress ? 'C' : '',
-                                run.merge ? 'M' : '',
-                              ]
-                                .filter(Boolean)
-                                .join('+') || '—'
-                            }`,
-                        )
-                        .join('；')
-                    : '—'
-                "
-                type="textarea"
-                :autosize="{ minRows: 1, maxRows: 4 }"
-                disabled
-              />
-            </el-form-item>
+            <template v-if="viewingEvalRecord && selectedEvalSummary">
+              <el-form-item label="测评摘要">
+                <el-input
+                  :model-value="formatEvalHistoryLabel(selectedEvalSummary)"
+                  disabled
+                />
+              </el-form-item>
+              <el-form-item label="被测 SP">
+                <el-input
+                  :model-value="formatEvalPromptVersions(selectedEvalSummary)"
+                  disabled
+                />
+              </el-form-item>
+              <el-form-item label="测评模式">
+                <el-input :model-value="selectedEvalModeLabel" disabled />
+              </el-form-item>
+              <el-form-item label="被测模型">
+                <el-input :model-value="selectedEvaluatedModelsLabel" disabled />
+              </el-form-item>
+              <el-form-item label="测评分">
+                <el-input
+                  :model-value="`${selectedEvalSummary.overall_score} / 置信 ${formatConfidence(selectedEvalSummary.overall_confidence)}`"
+                  disabled
+                />
+              </el-form-item>
+            </template>
+            <template v-else>
+              <el-form-item label="轮次">
+                <el-input
+                  :model-value="
+                    rpHistoryDetail
+                      ? `${rpHistoryDetail.round_start} - ${rpHistoryDetail.round_end}`
+                      : '—'
+                  "
+                  disabled
+                />
+              </el-form-item>
+              <el-form-item label="SP 版本">
+                <el-input :model-value="rpHistoryDetail?.prompt_version ?? '—'" disabled />
+              </el-form-item>
+              <el-form-item label="对比模型">
+                <el-input
+                  :model-value="formatEvaluatedModelsLabel(checkedEvalModels)"
+                  disabled
+                />
+              </el-form-item>
+              <el-form-item label="被测产出">
+                <el-input
+                  :model-value="
+                    selectedModelRuns.length
+                      ? selectedModelRuns
+                          .map(
+                            (run) =>
+                              `${run.model}: ${
+                                [
+                                  run.compress ? 'C' : '',
+                                  run.merge ? 'M' : '',
+                                ]
+                                  .filter(Boolean)
+                                  .join('+') || '—'
+                              }`,
+                          )
+                          .join('；')
+                      : '—'
+                  "
+                  type="textarea"
+                  :autosize="{ minRows: 1, maxRows: 4 }"
+                  disabled
+                />
+              </el-form-item>
+            </template>
             <el-form-item label="测评 SP" class="content-item">
               <el-input
                 v-model="evalSystemPrompt"
@@ -665,8 +769,11 @@ onUnmounted(() => {
           <span>RP 测评</span>
           <ApiRuntimePicker scope="eval" />
         </template>
-        <div class="test-panel-body">
-          <el-form label-width="88px" class="test-form">
+        <div
+          class="test-panel-body"
+          :class="{ 'test-panel-body--preview': viewingEvalRecord }"
+        >
+          <el-form v-if="!viewingEvalRecord" label-width="88px" class="test-form">
             <RuntimeParamsFields
               :temperature="runtime.temperature"
               :top-k="runtime.top_k"
@@ -687,44 +794,40 @@ onUnmounted(() => {
           </el-form>
 
           <div v-if="currentRaw || currentParsed" class="result-block">
-            <div class="result-title">
-              <span>{{
-                selectedEvalId ? `测评结果 #${selectedEvalId}` : '本次测评结果'
-              }}</span>
-              <span
-                v-if="
-                  (selectedEvalSummary &&
-                    formatEvalPromptVersions(selectedEvalSummary) !== '—') ||
-                  (!selectedEvalId &&
-                    evalPayloadDetail &&
-                    [
-                      evalPayloadDetail.compress_run?.prompt_version
-                        ? `C:${evalPayloadDetail.compress_run.prompt_version}`
-                        : '',
-                      evalPayloadDetail.merge_run?.prompt_version
-                        ? `M:${evalPayloadDetail.merge_run.prompt_version}`
-                        : '',
-                    ]
-                      .filter(Boolean)
-                      .join(' '))
-                "
-                class="result-prompt-versions"
+            <div class="result-title-row">
+              <div class="result-title-main">
+                <span class="result-title">
+                  {{
+                    viewingEvalRecord && selectedEvalId
+                      ? `测评记录 #${selectedEvalId}`
+                      : selectedEvalId
+                        ? `测评结果 #${selectedEvalId}`
+                        : '本次测评结果'
+                  }}
+                </span>
+                <span
+                  v-if="resultPromptVersions !== '—'"
+                  class="result-prompt-versions"
+                >
+                  {{ resultPromptVersions }}
+                </span>
+              </div>
+              <div
+                v-if="viewingEvalRecord && (evalRecordTemperature !== null || evalRecordTopK !== null)"
+                class="result-meta-chips"
               >
-                {{
-                  selectedEvalSummary
-                    ? formatEvalPromptVersions(selectedEvalSummary)
-                    : [
-                        evalPayloadDetail?.compress_run?.prompt_version
-                          ? `C:${evalPayloadDetail.compress_run.prompt_version}`
-                          : '',
-                        evalPayloadDetail?.merge_run?.prompt_version
-                          ? `M:${evalPayloadDetail.merge_run.prompt_version}`
-                          : '',
-                      ]
-                        .filter(Boolean)
-                        .join(' ')
-                }}
-              </span>
+                <span
+                  v-if="evalRecordTemperature !== null"
+                  class="record-meta-chip"
+                >
+                  <span class="record-meta-label">temperature</span>
+                  <span class="record-meta-value">{{ evalRecordTemperature }}</span>
+                </span>
+                <span v-if="evalRecordTopK !== null" class="record-meta-chip">
+                  <span class="record-meta-label">top_k</span>
+                  <span class="record-meta-value">{{ evalRecordTopK }}</span>
+                </span>
+              </div>
             </div>
             <el-scrollbar class="result-scroll">
               <RpEvalResultView :raw-content="currentRaw" :parsed="currentParsed" />
@@ -755,25 +858,81 @@ onUnmounted(() => {
   min-height: 180px;
 }
 
+.test-panel-body--preview .result-block {
+  padding-top: 14px;
+}
+
 .result-block {
   flex: 1;
   min-height: 0;
   padding: 0 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
-.result-title {
+.result-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.result-title-main {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+  min-width: 0;
+}
+
+.result-title {
   font-size: 13px;
   font-weight: 600;
+  flex-shrink: 0;
 }
 
 .result-prompt-versions {
   font-size: 12px;
   font-weight: 500;
   color: #909399;
+}
+
+.result-meta-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+.record-meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  background: #f4f4f5;
+  color: #606266;
+}
+
+.record-meta-label {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 400;
+  opacity: 0.72;
+}
+
+.record-meta-value {
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .result-scroll {

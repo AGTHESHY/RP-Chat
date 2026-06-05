@@ -1,4 +1,5 @@
 import type { BrainAnalysisSummary, RpEvalSummary, RpHistoryDetail } from '../api'
+import { formatHistoryTime } from './format'
 
 /** 与「RP测试历史」表格行数一致；无产出时显示 — */
 export function formatRpHistoryModelCount(
@@ -25,6 +26,18 @@ export function formatEvaluatedModels(row: RpEvalSummary): string {
     return `${models.length}模型`
   }
   return models[0]
+}
+
+/** 测评历史列表行的可读摘要，用于智脑「关联测评」等场景 */
+export function formatEvalHistoryLabel(row: RpEvalSummary): string {
+  const parts = [
+    formatHistoryTime(row.created_at),
+    formatEvalPromptVersions(row),
+    formatEvaluatedModels(row),
+    `${row.overall_score}分`,
+  ].filter((part) => part && part !== '—')
+  const summary = parts.join(' · ')
+  return summary ? `${summary}（#${row.id}）` : `#${row.id}`
 }
 
 export function formatEvalPromptVersions(row: RpEvalSummary): string {
