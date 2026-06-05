@@ -1,4 +1,11 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import PromptManager from '../views/PromptManager.vue'
+import TestPage from '../views/TestPage.vue'
+import RpEvalPage from '../views/RpEvalPage.vue'
+import SmartBrainPage from '../views/SmartBrainPage.vue'
+import ApiConfigPage from '../views/ApiConfigPage.vue'
+import JailbreakPage from '../views/JailbreakPage.vue'
+import TestCasePage from '../views/TestCasePage.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -6,37 +13,37 @@ const router = createRouter({
     {
       path: '/',
       name: 'prompts',
-      component: () => import('../views/PromptManager.vue'),
+      component: PromptManager,
     },
     {
       path: '/test',
       name: 'test',
-      component: () => import('../views/TestPage.vue'),
+      component: TestPage,
     },
     {
       path: '/rp-eval',
       name: 'rp-eval',
-      component: () => import('../views/RpEvalPage.vue'),
+      component: RpEvalPage,
     },
     {
       path: '/smart-brain',
       name: 'smart-brain',
-      component: () => import('../views/SmartBrainPage.vue'),
+      component: SmartBrainPage,
     },
     {
       path: '/api-config',
       name: 'api-config',
-      component: () => import('../views/ApiConfigPage.vue'),
+      component: ApiConfigPage,
     },
     {
       path: '/jailbreak',
       name: 'jailbreak',
-      component: () => import('../views/JailbreakPage.vue'),
+      component: JailbreakPage,
     },
     {
       path: '/test-cases',
       name: 'test-cases',
-      component: () => import('../views/TestCasePage.vue'),
+      component: TestCasePage,
     },
   ],
 })

@@ -306,12 +306,10 @@ def get_prompt_content(
 def get_doc_content(db: Session, version: str) -> dict[str, Any]:
     if is_baseline(version):
         row = db.query(VersionDoc).filter(VersionDoc.version == version).first()
-        if not row:
-            raise HTTPException(status_code=404, detail="Doc not found")
         return {
             "version": version,
             "filename": version_doc_filename(version),
-            "content": row.content,
+            "content": row.content if row else "",
             "readonly": True,
         }
 
@@ -325,12 +323,10 @@ def get_doc_content(db: Session, version: str) -> dict[str, Any]:
         }
 
     row = db.query(VersionDoc).filter(VersionDoc.version == version).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="Doc not found")
     return {
         "version": version,
         "filename": version_doc_filename(version),
-        "content": row.content,
+        "content": row.content if row else "",
         "readonly": False,
     }
 

@@ -1,15 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute } from 'vue-router'
 
 const route = useRoute()
-const router = useRouter()
-
-const active = computed(() => route.path)
-
-function navigate(path: string) {
-  router.push(path)
-}
+const activeMenu = computed(() => route.path)
 </script>
 
 <template>
@@ -18,10 +12,10 @@ function navigate(path: string) {
       <div class="brand">RP Chat 提示词管理</div>
       <el-menu
         mode="horizontal"
-        :default-active="active"
+        :default-active="activeMenu"
         :ellipsis="false"
+        router
         class="nav-menu"
-        @select="navigate"
       >
         <el-menu-item index="/">提示词管理</el-menu-item>
         <el-menu-item index="/test-cases">测试用例</el-menu-item>
@@ -62,6 +56,8 @@ function navigate(path: string) {
 }
 
 .app-header {
+  position: relative;
+  z-index: 200;
   display: flex;
   align-items: center;
   gap: 24px;
@@ -72,6 +68,7 @@ function navigate(path: string) {
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
+  flex-shrink: 0;
 }
 
 .app-header::-webkit-scrollbar {
