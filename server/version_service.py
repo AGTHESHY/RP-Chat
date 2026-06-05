@@ -542,6 +542,168 @@ async def translate_draft(
     return {"ok": True, "version": version, "translated": translated_keys}
 
 
+def _format_revision_plan_items(items: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for idx, item in enumerate(items, start=1):
+        section = str(item.get("section") or "未命名区块").strip()
+        action = str(item.get("action") or "modify").strip()
+        summary = str(item.get("summary") or "").strip()
+        detail = str(item.get("detail") or summary).strip()
+        lines.append(
+            f"{idx}. [{action}] {section}\n"
+            f"   摘要: {summary}\n"
+            f"   详情: {detail}"
+        )
+    return "\n".join(lines)
+
+
+async def _revise_prompt_section(
+    base_url: str,
+    headers: dict[str, str],
+    model: str,
+    temperature: float,
+    *,
+    section_kind: str,
+    original: str,
+    rationale: str,
+    focus_areas: list[str],
+    linked_issues: list[str],
+    revision_items: list[dict[str, Any]],
+) -> str:
+    if not original.strip():
+        return original
+
+    plan_text = _format_revision_plan_items(revision_items)
+    focus_text = "\n".join(f"- {x}" for x in focus_areas if str(x).strip())
+    issues_text = "\n".join(f"- {x}" for x in linked_issues if str(x).strip())
+
+    system = (
+        "You are an expert editor for RP Chat memory system prompts (Chinese). "
+        f"Apply ALL listed changes to the ORIGINAL {section_kind} section only. "
+        "Preserve markdown structure, JSON examples, field names, and {{NSFW}} markers "
+        "unless a revision item explicitly requires changing them. "
+        f"Do NOT merge SFW and NSFW content; edit ONLY the {section_kind} section. "
+        "Output ONLY the full revised prompt text. No markdown fences, no explanation."
+    )
+    user_parts = [f"## 修订依据\n{rationale.strip() or '（无）'}"]
+    if focus_text:
+        user_parts.append(f"## 改动方向\n{focus_text}")
+    if issues_text:
+        user_parts.append(f"## 关联测评问题\n{issues_text}")
+    if plan_text:
+        user_parts.append(f"## 修订计划（须逐条落实）\n{plan_text}")
+    else:
+        user_parts.append("## 修订计划\n根据上述改动方向与测评问题，做最小必要修订。")
+    user_parts.append(f"## 原始 {section_kind} 内容\n\n{original}")
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": "\n\n".join(user_parts)},
+        ],
+        "stream": False,
+        "temperature": temperature,
+        "max_completion_tokens": 8192,
+    }
+
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        resp = await client.post(base_url, json=payload, headers=headers)
+
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Brain revision API failed ({section_kind}): {resp.text[:500]}",
+        )
+
+    data = resp.json()
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    revised = content.strip()
+    return revised or original
+
+
+async def apply_brain_revision(
+    db: Session,
+    version: str,
+    *,
+    prompt_type: str,
+    focus_areas: list[str],
+    linked_issues: list[str],
+    rationale: str,
+    revision_plan: dict[str, Any],
+    base_url: str,
+    api_key: str,
+    model: str,
+    temperature: float = 0.3,
+) -> dict[str, Any]:
+    validate_writable(version)
+
+    if prompt_type not in PROMPT_TYPES:
+        raise HTTPException(status_code=400, detail="Invalid prompt type")
+
+    draft = get_draft(version)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found in Redis")
+
+    zh_key = prompt_storage_key(prompt_type, "zh")
+    zh_part = draft.get("prompts", {}).get(zh_key)
+    if not zh_part:
+        raise HTTPException(status_code=404, detail=f"Draft prompt not found: {prompt_type}")
+
+    base_url = normalize_base_url(base_url)
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+
+    sfw_items = revision_plan.get("sfw") if isinstance(revision_plan.get("sfw"), list) else []
+    nsfw_items = revision_plan.get("nsfw") if isinstance(revision_plan.get("nsfw"), list) else []
+
+    original_sfw = str(zh_part.get("content_sfw") or "")
+    original_nsfw = str(zh_part.get("content_nsfw") or "")
+
+    revised_sfw = await _revise_prompt_section(
+        base_url,
+        headers,
+        model,
+        temperature,
+        section_kind="SFW",
+        original=original_sfw,
+        rationale=rationale,
+        focus_areas=focus_areas,
+        linked_issues=linked_issues,
+        revision_items=sfw_items,
+    )
+    revised_nsfw = await _revise_prompt_section(
+        base_url,
+        headers,
+        model,
+        temperature,
+        section_kind="NSFW",
+        original=original_nsfw,
+        rationale=rationale,
+        focus_areas=focus_areas,
+        linked_issues=linked_issues,
+        revision_items=nsfw_items,
+    )
+
+    update_draft(
+        db,
+        version,
+        prompt_type=prompt_type,
+        lang="zh",
+        content_sfw=revised_sfw,
+        content_nsfw=revised_nsfw,
+    )
+
+    return {
+        "ok": True,
+        "version": version,
+        "prompt_type": prompt_type,
+        "revised": ["content_sfw", "content_nsfw"],
+    }
+
+
 async def _translate_text(
     base_url: str,
     headers: dict[str, str],

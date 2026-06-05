@@ -255,6 +255,26 @@ export interface TranslateRequest {
   temperature: number
 }
 
+export interface BrainRevisionPlanItemPayload {
+  section: string
+  action: string
+  summary: string
+  detail: string
+}
+
+export interface BrainRevisionPlanPayload {
+  sfw: BrainRevisionPlanItemPayload[]
+  nsfw: BrainRevisionPlanItemPayload[]
+}
+
+export interface BrainRevisionRequest extends TranslateRequest {
+  prompt_type: 'segment_compress' | 'history_merge'
+  focus_areas: string[]
+  linked_issues: string[]
+  rationale: string
+  revision_plan: BrainRevisionPlanPayload
+}
+
 export const NSFW_MARKER = '{{NSFW}}'
 export const NSFW_PART_SEP = '\n---NSFW_PART---\n'
 
@@ -343,6 +363,17 @@ export function commitVersion(version: string) {
 export function translateVersion(version: string, body: TranslateRequest) {
   return request<{ ok: boolean; version: string; translated: string[] }>(
     `/api/versions/${encodeURIComponent(version)}/translate`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  )
+}
+
+export function applyBrainRevision(version: string, body: BrainRevisionRequest) {
+  return request<{ ok: boolean; version: string; prompt_type: string; revised: string[] }>(
+    `/api/versions/${encodeURIComponent(version)}/brain-revision`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

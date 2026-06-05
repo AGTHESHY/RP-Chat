@@ -854,10 +854,10 @@ onUnmounted(() => {
               :content="currentRaw"
               :reasoning="currentReasoning"
             >
-              <BrainResultView v-if="currentParsed" :parsed="currentParsed" />
+              <BrainResultView v-if="currentParsed" :parsed="currentParsed" :api-config="resolvedRequest" />
             </StreamResultPanel>
             <el-scrollbar v-else class="result-scroll">
-              <BrainResultView v-if="currentParsed" :parsed="currentParsed" />
+              <BrainResultView v-if="currentParsed" :parsed="currentParsed" :api-config="resolvedRequest" />
             </el-scrollbar>
           </div>
           <el-empty

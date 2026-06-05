@@ -33,9 +33,18 @@ user 消息为 JSON，包含：
 ### C. 版本更迭（必选）
 1. 结合 version_context：is_baseline、version_kind、parent_chain、root_baseline。
 2. custom_fork + 局部可修复问题 → minor，给出 suggested_version_name。
-3. 系统性策略缺陷或需换 root 基线 → major，target_base_version 只能是 v1 或 v2。
-4. Compress 与 Merge 可分别给出不同 recommendation。
-5. 小版本时 suggested_version_name：字母开头，仅字母数字下划线，不能是 v1、v2。
+3. **当被测 evaluated_version 与 base_version 相同**（如均为 v2）且 recommendation=minor 时：必须在 modules[].revision_plan 中分别列出 SFW 与 NSFW 的详细修改计划（不能只写 focus_areas）；创建建议版本时将据此由 AI 自动修订草稿，而非纯复制。
+4. 系统性策略缺陷或需换 root 基线 → major，target_base_version 只能是 v1 或 v2。
+5. Compress 与 Merge 可分别给出不同 recommendation。
+6. 小版本时 suggested_version_name：字母开头，仅字母数字下划线，不能是 v1、v2。
+
+revision_plan 每项字段：
+- section：修改位置（如「字段约束」「character_state 说明」「冗余检查规则」）
+- action：add | modify | remove | clarify
+- summary：一行摘要
+- detail：详细说明将改什么、为何改、期望效果（可引用测评 issues）
+
+SFW 与 NSFW 须分别列出：同一 focus_area 若在 NSFW 场景有额外约束，NSFW 侧 detail 须写清差异。
 
 ## 输出格式（严格遵守）
 1. 仅输出一个 JSON 对象，以 { 开头、} 结尾
@@ -76,7 +85,25 @@ user 消息为 JSON，包含：
       "suggested_version_name": "v1_refine_grounding",
       "target_base_version": null,
       "rationale": "依据测评 issues 的说明",
-      "focus_areas": ["具体改动点1"]
+      "focus_areas": ["具体改动点1"],
+      "revision_plan": {
+        "sfw": [
+          {
+            "section": "字段约束 / 示例段落",
+            "action": "modify",
+            "summary": "一行摘要",
+            "detail": "详细说明将修改哪段规则、如何改、预期解决哪条测评 issue"
+          }
+        ],
+        "nsfw": [
+          {
+            "section": "NSFW 专属规则",
+            "action": "add",
+            "summary": "一行摘要",
+            "detail": "NSFW 侧与 SFW 的差异化修改说明"
+          }
+        ]
+      }
     }
   ],
   "next_steps": ["可执行后续步骤1"]

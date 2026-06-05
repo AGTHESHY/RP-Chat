@@ -2,17 +2,22 @@
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { createVersion, listVersions } from '../api'
+import { applyBrainRevision, createVersion, listVersions } from '../api'
+import type { ResolvedRuntimeRequest } from '../utils/apiProfileStorage'
+import { resolveRevisionPlan, revisionActionLabel } from '../utils/brainRevisionDisplay'
 import {
   brainRecommendationLabel,
   devPotentialLabel,
   isValidSuggestedVersionName,
+  needsAiAutoRevision,
+  type BrainModuleAdvice,
   type BrainParsed,
   type BrainRecommendation,
 } from '../utils/parseBrainJson'
 
 const props = defineProps<{
   parsed: BrainParsed
+  apiConfig?: ResolvedRuntimeRequest | null
 }>()
 
 const router = useRouter()
@@ -37,6 +42,21 @@ function moduleTagType(rec: BrainRecommendation): 'success' | 'warning' | 'dange
   return 'success'
 }
 
+function linkedIssuesFor(mod: BrainModuleAdvice): string[] {
+  return (
+    props.parsed.sp_improvements.find((item) => item.prompt_type === mod.prompt_type)
+      ?.linked_issues ?? []
+  )
+}
+
+function revisionPlanFor(mod: BrainModuleAdvice) {
+  return resolveRevisionPlan(mod, linkedIssuesFor(mod))
+}
+
+function showRevisionPlan(mod: BrainModuleAdvice): boolean {
+  return mod.recommendation === 'minor' && needsAiAutoRevision(mod)
+}
+
 function goPromptManager(version?: string) {
   if (version) {
     void router.push({ path: '/', query: { version } })
@@ -45,16 +65,16 @@ function goPromptManager(version?: string) {
   }
 }
 
-async function handleCreateVersion(
-  name: string,
-  baseVersion: string,
-  evaluatedVersion: string,
-) {
-  if (!isValidSuggestedVersionName(name)) {
+async function handleCreateVersion(mod: BrainModuleAdvice) {
+  const name = mod.suggested_version_name
+  if (!name || !isValidSuggestedVersionName(name)) {
     ElMessage.warning('建议版本名不合法')
     return
   }
+
   creatingVersion.value = name
+  const aiRevision = needsAiAutoRevision(mod)
+
   try {
     const catalog = await listVersions()
     const exists =
@@ -66,8 +86,34 @@ async function handleCreateVersion(
       goPromptManager(name)
       return
     }
-    await createVersion(name, evaluatedVersion || baseVersion || null)
-    ElMessage.success(`已创建草稿版本 ${name}`)
+
+    await createVersion(name, mod.evaluated_version || mod.base_version || null)
+
+    if (aiRevision) {
+      const cfg = props.apiConfig
+      if (!cfg?.base_url?.trim() || !cfg.api_key?.trim() || !cfg.model?.trim()) {
+        ElMessage.warning(`已创建草稿 ${name}，但未配置 API，无法自动 AI 修订`)
+        goPromptManager(name)
+        return
+      }
+
+      const plan = revisionPlanFor(mod)
+      await applyBrainRevision(name, {
+        prompt_type: mod.prompt_type,
+        focus_areas: mod.focus_areas,
+        linked_issues: linkedIssuesFor(mod),
+        rationale: mod.rationale,
+        revision_plan: plan,
+        base_url: cfg.base_url,
+        api_key: cfg.api_key,
+        model: cfg.model,
+        temperature: cfg.temperature,
+      })
+      ElMessage.success(`已创建 ${name}，并由 AI 更新 SFW / NSFW 草稿`)
+    } else {
+      ElMessage.success(`已创建草稿版本 ${name}`)
+    }
+
     goPromptManager(name)
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '创建版本失败')
@@ -158,6 +204,50 @@ async function handleCreateVersion(
       <ul v-if="mod.focus_areas.length" class="brain-focus-list">
         <li v-for="(area, idx) in mod.focus_areas" :key="idx">{{ area }}</li>
       </ul>
+
+      <div v-if="showRevisionPlan(mod)" class="brain-revision-plan">
+        <div class="brain-revision-plan-title">
+          AI 修订计划
+          <span class="brain-revision-plan-hint">
+            （被测与基线版本相同，创建时将自动写入 SFW / NSFW 草稿）
+          </span>
+        </div>
+
+        <div class="brain-revision-column">
+          <div class="brain-revision-column-head">SFW 将修改</div>
+          <div
+            v-for="(item, idx) in revisionPlanFor(mod).sfw"
+            :key="`sfw-${idx}`"
+            class="brain-revision-item"
+          >
+            <div class="brain-revision-item-head">
+              <el-tag size="small" type="info">{{ revisionActionLabel(item.action) }}</el-tag>
+              <span class="brain-revision-section">{{ item.section }}</span>
+            </div>
+            <div class="brain-revision-summary">{{ item.summary }}</div>
+            <div class="brain-revision-detail">{{ item.detail }}</div>
+          </div>
+          <p v-if="!revisionPlanFor(mod).sfw.length" class="brain-revision-empty">（暂无 SFW 修订项）</p>
+        </div>
+
+        <div class="brain-revision-column">
+          <div class="brain-revision-column-head">NSFW 将修改</div>
+          <div
+            v-for="(item, idx) in revisionPlanFor(mod).nsfw"
+            :key="`nsfw-${idx}`"
+            class="brain-revision-item"
+          >
+            <div class="brain-revision-item-head">
+              <el-tag size="small" type="warning">{{ revisionActionLabel(item.action) }}</el-tag>
+              <span class="brain-revision-section">{{ item.section }}</span>
+            </div>
+            <div class="brain-revision-summary">{{ item.summary }}</div>
+            <div class="brain-revision-detail">{{ item.detail }}</div>
+          </div>
+          <p v-if="!revisionPlanFor(mod).nsfw.length" class="brain-revision-empty">（暂无 NSFW 修订项）</p>
+        </div>
+      </div>
+
       <div v-if="mod.recommendation === 'minor' && mod.suggested_version_name" class="brain-actions">
         <span class="brain-suggest-name">建议 fork：{{ mod.suggested_version_name }}</span>
         <el-button
@@ -165,15 +255,9 @@ async function handleCreateVersion(
           type="primary"
           plain
           :loading="creatingVersion === mod.suggested_version_name"
-          @click="
-            handleCreateVersion(
-              mod.suggested_version_name!,
-              mod.base_version,
-              mod.evaluated_version,
-            )
-          "
+          @click="handleCreateVersion(mod)"
         >
-          创建建议版本
+          {{ needsAiAutoRevision(mod) ? '创建并 AI 修订' : '创建建议版本' }}
         </el-button>
       </div>
       <div v-if="mod.recommendation === 'major' && mod.target_base_version" class="brain-actions">
@@ -250,6 +334,80 @@ async function handleCreateVersion(
   margin: 6px 0 0;
   padding-left: 18px;
   color: #606266;
+}
+
+.brain-revision-plan {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid #dcdfe6;
+  border-radius: 6px;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.brain-revision-plan-title {
+  font-weight: 600;
+  color: #303133;
+}
+
+.brain-revision-plan-hint {
+  font-weight: 400;
+  font-size: 12px;
+  color: #909399;
+}
+
+.brain-revision-column {
+  border-top: 1px dashed #ebeef5;
+  padding-top: 8px;
+}
+
+.brain-revision-column-head {
+  font-size: 12px;
+  font-weight: 600;
+  color: #409eff;
+  margin-bottom: 6px;
+}
+
+.brain-revision-item {
+  padding: 8px 0;
+  border-bottom: 1px solid #f0f2f5;
+}
+
+.brain-revision-item:last-child {
+  border-bottom: none;
+}
+
+.brain-revision-item-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.brain-revision-section {
+  font-weight: 500;
+  color: #303133;
+}
+
+.brain-revision-summary {
+  font-size: 12px;
+  color: #606266;
+}
+
+.brain-revision-detail {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #909399;
+  line-height: 1.55;
+}
+
+.brain-revision-empty {
+  margin: 0;
+  font-size: 12px;
+  color: #c0c4cc;
 }
 
 .brain-actions {

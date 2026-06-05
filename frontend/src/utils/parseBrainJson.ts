@@ -25,6 +25,18 @@ export interface BrainRpModelInsights {
   per_model: BrainRpModelInsightItem[]
 }
 
+export interface BrainRevisionPlanItem {
+  section: string
+  action: 'add' | 'modify' | 'remove' | 'clarify' | string
+  summary: string
+  detail: string
+}
+
+export interface BrainRevisionPlan {
+  sfw: BrainRevisionPlanItem[]
+  nsfw: BrainRevisionPlanItem[]
+}
+
 export interface BrainModuleAdvice {
   prompt_type: 'segment_compress' | 'history_merge'
   evaluated_version: string
@@ -34,6 +46,7 @@ export interface BrainModuleAdvice {
   target_base_version?: string
   rationale: string
   focus_areas: string[]
+  revision_plan?: BrainRevisionPlan
 }
 
 export interface BrainParsed {
@@ -125,6 +138,35 @@ function parseRpModelInsights(raw: unknown): BrainRpModelInsights {
   }
 }
 
+function parseRevisionPlanItem(raw: unknown): BrainRevisionPlanItem | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const item = raw as Record<string, unknown>
+  const summary = String(item.summary ?? item.title ?? '').trim()
+  const detail = String(item.detail ?? item.description ?? summary).trim()
+  if (!summary && !detail) return null
+  return {
+    section: String(item.section ?? item.target ?? '未命名区块').trim() || '未命名区块',
+    action: String(item.action ?? 'modify').trim() || 'modify',
+    summary: summary || detail,
+    detail: detail || summary,
+  }
+}
+
+function parseRevisionPlan(raw: unknown): BrainRevisionPlan | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const item = raw as Record<string, unknown>
+  const sfwRaw = item.sfw
+  const nsfwRaw = item.nsfw
+  const sfw = Array.isArray(sfwRaw)
+    ? sfwRaw.map(parseRevisionPlanItem).filter((x): x is BrainRevisionPlanItem => x !== null)
+    : []
+  const nsfw = Array.isArray(nsfwRaw)
+    ? nsfwRaw.map(parseRevisionPlanItem).filter((x): x is BrainRevisionPlanItem => x !== null)
+    : []
+  if (sfw.length === 0 && nsfw.length === 0) return undefined
+  return { sfw, nsfw }
+}
+
 function parseModuleAdvice(raw: unknown): BrainModuleAdvice | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
   const item = raw as Record<string, unknown>
@@ -148,6 +190,7 @@ function parseModuleAdvice(raw: unknown): BrainModuleAdvice | null {
     target_base_version: targetBase,
     rationale: String(item.rationale ?? ''),
     focus_areas,
+    revision_plan: parseRevisionPlan(item.revision_plan),
   }
 }
 
@@ -206,4 +249,13 @@ export function isValidSuggestedVersionName(name: string): boolean {
   const n = name.trim()
   if (!n || n === 'v1' || n === 'v2') return false
   return /^[a-zA-Z][a-zA-Z0-9_]*$/.test(n)
+}
+
+/** 被测与基线版本相同且建议 minor 时，fork 后需 AI 修订而非纯复制 */
+export function needsAiAutoRevision(mod: BrainModuleAdvice): boolean {
+  return (
+    mod.recommendation === 'minor' &&
+    Boolean(mod.evaluated_version) &&
+    mod.evaluated_version === mod.base_version
+  )
 }

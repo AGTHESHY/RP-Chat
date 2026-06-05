@@ -67,6 +67,7 @@ from version_service import (
     create_version_draft,
     delete_version_tree,
     discard_draft,
+    apply_brain_revision,
     get_doc_content,
     get_prompt_content,
     get_version_meta,
@@ -121,6 +122,30 @@ class DraftPromptUpdate(BaseModel):
 
 
 class TranslateRequest(BaseModel):
+    base_url: str
+    api_key: str
+    model: str
+    temperature: float = 0.3
+
+
+class BrainRevisionPlanItem(BaseModel):
+    section: str = ""
+    action: str = "modify"
+    summary: str = ""
+    detail: str = ""
+
+
+class BrainRevisionPlanBody(BaseModel):
+    sfw: list[BrainRevisionPlanItem] = Field(default_factory=list)
+    nsfw: list[BrainRevisionPlanItem] = Field(default_factory=list)
+
+
+class BrainRevisionRequest(BaseModel):
+    prompt_type: str
+    focus_areas: list[str] = Field(default_factory=list)
+    linked_issues: list[str] = Field(default_factory=list)
+    rationale: str = ""
+    revision_plan: BrainRevisionPlanBody = Field(default_factory=BrainRevisionPlanBody)
     base_url: str
     api_key: str
     model: str
@@ -242,6 +267,31 @@ async def api_translate_version(
     return await translate_draft(
         db,
         version,
+        base_url=body.base_url,
+        api_key=body.api_key,
+        model=body.model,
+        temperature=body.temperature,
+    )
+
+
+@app.post("/api/versions/{version}/brain-revision")
+async def api_apply_brain_revision(
+    version: str,
+    body: BrainRevisionRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    plan_dict = {
+        "sfw": [item.model_dump() for item in body.revision_plan.sfw],
+        "nsfw": [item.model_dump() for item in body.revision_plan.nsfw],
+    }
+    return await apply_brain_revision(
+        db,
+        version,
+        prompt_type=body.prompt_type,
+        focus_areas=body.focus_areas,
+        linked_issues=body.linked_issues,
+        rationale=body.rationale,
+        revision_plan=plan_dict,
         base_url=body.base_url,
         api_key=body.api_key,
         model=body.model,
