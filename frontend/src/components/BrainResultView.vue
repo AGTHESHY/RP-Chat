@@ -109,9 +109,9 @@ async function handleCreateVersion(mod: BrainModuleAdvice) {
         model: cfg.model,
         temperature: cfg.temperature,
       })
-      ElMessage.success(`已创建 ${name}，并由 AI 更新 SFW / NSFW 草稿`)
+      ElMessage.success(`已创建 ${name}，并由 AI 修订 ZH/EN 草稿`)
     } else {
-      ElMessage.success(`已创建草稿版本 ${name}`)
+      ElMessage.success(`已创建参考版本 ${name}（未自动修订）`)
     }
 
     goPromptManager(name)
@@ -209,7 +209,7 @@ async function handleCreateVersion(mod: BrainModuleAdvice) {
         <div class="brain-revision-plan-title">
           AI 修订计划
           <span class="brain-revision-plan-hint">
-            （被测与基线版本相同，创建时将自动写入 SFW / NSFW 草稿）
+            （创建时将自动写入 SFW / NSFW 中英文草稿）
           </span>
         </div>
 
@@ -264,6 +264,18 @@ async function handleCreateVersion(mod: BrainModuleAdvice) {
         <span class="brain-suggest-name">建议切换基线 → {{ mod.target_base_version }}</span>
         <el-button size="small" @click="goPromptManager(mod.target_base_version)">
           查看基线 {{ mod.target_base_version }}
+        </el-button>
+      </div>
+      <div v-if="mod.recommendation === 'hold' && mod.focus_areas.length > 0 && mod.suggested_version_name" class="brain-actions">
+        <span class="brain-suggest-name">可选 fork：{{ mod.suggested_version_name }}</span>
+        <el-button
+          size="small"
+          type="primary"
+          plain
+          :loading="creatingVersion === mod.suggested_version_name"
+          @click="handleCreateVersion(mod)"
+        >
+          创建参考版本（不自动修订）
         </el-button>
       </div>
       <div class="brain-actions">

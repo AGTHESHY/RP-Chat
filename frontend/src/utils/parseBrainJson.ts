@@ -251,11 +251,11 @@ export function isValidSuggestedVersionName(name: string): boolean {
   return /^[a-zA-Z][a-zA-Z0-9_]*$/.test(n)
 }
 
-/** 被测与基线版本相同且建议 minor 时，fork 后需 AI 修订而非纯复制 */
+/** 被测版本建议 minor 且给出了建议版本名时，fork 后需 AI 修订而非纯复制 */
 export function needsAiAutoRevision(mod: BrainModuleAdvice): boolean {
   return (
     mod.recommendation === 'minor' &&
     Boolean(mod.evaluated_version) &&
-    mod.evaluated_version === mod.base_version
+    Boolean(mod.suggested_version_name)
   )
 }

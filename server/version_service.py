@@ -237,6 +237,14 @@ def create_version_draft(
             prompts[prompt_storage_key(prompt_type, "zh")] = _load_source_prompt(
                 db, source, prompt_type, "zh"
             )
+        # 同时复制源版本的 EN 提示词（如果存在）
+        for prompt_type in PROMPT_TYPES:
+            try:
+                en_part = _load_source_prompt(db, source, prompt_type, "en")
+                if en_part.get("content_sfw") or en_part.get("content_nsfw"):
+                    prompts[prompt_storage_key(prompt_type, "en")] = en_part
+            except Exception:
+                pass  # EN 可能不存在，这是正常的
         doc_content = _load_source_doc(db, source)
         doc_content = doc_content.replace(source, version) if doc_content else f"# {version}\n\n"
     else:
@@ -696,11 +704,40 @@ async def apply_brain_revision(
         content_nsfw=revised_nsfw,
     )
 
+    # 同步修订 EN：将修订后的 ZH 翻译为 EN 并写回 draft
+    en_key = prompt_storage_key(prompt_type, "en")
+    en_part = draft.get("prompts", {}).get(en_key)
+    has_en = bool(en_part and (en_part.get("content_sfw") or en_part.get("content_nsfw")))
+    revised_keys = ["content_sfw", "content_nsfw"]
+
+    if has_en or revised_sfw.strip() or revised_nsfw.strip():
+        try:
+            en_sfw = await _translate_text(
+                base_url, headers, model, temperature,
+                revised_sfw, f"{prompt_type} SFW English"
+            )
+            en_nsfw = await _translate_text(
+                base_url, headers, model, temperature,
+                revised_nsfw, f"{prompt_type} NSFW English"
+            )
+            update_draft(
+                db,
+                version,
+                prompt_type=prompt_type,
+                lang="en",
+                content_sfw=en_sfw,
+                content_nsfw=en_nsfw,
+            )
+            revised_keys.append("en_content_sfw")
+            revised_keys.append("en_content_nsfw")
+        except Exception:
+            pass  # 翻译失败不影响 ZH 修订结果
+
     return {
         "ok": True,
         "version": version,
         "prompt_type": prompt_type,
-        "revised": ["content_sfw", "content_nsfw"],
+        "revised": revised_keys,
     }
 
 

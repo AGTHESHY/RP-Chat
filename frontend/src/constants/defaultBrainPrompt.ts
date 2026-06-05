@@ -29,14 +29,26 @@ user 消息为 JSON，包含：
    - ranking：推荐关注顺序
    - per_model[]：每个模型的 dev_potential（high/medium/low）、sp_actionable_issues、summary
 4. 区分「全模型共性的 SP 问题」与「单模型特有问题」。
+5. **不同模型的 SP 关联**（eval_mode=multi_compare 时）：
+   - 当各模型使用不同 SP 版本时，per_model[].sp_actionable_issues 应关联该模型对应的被测 SP 版本
+   - 当所有模型共用同一 SP 版本时，共性 SP 问题归入 modules[].focus_areas，模型特有差异归入 per_model[].sp_actionable_issues
+   - 若某模型的 SP 版本与其他模型不同，需在 summary 中标注其使用的 SP 版本
 
 ### C. 版本更迭（必选）
 1. 结合 version_context：is_baseline、version_kind、parent_chain、root_baseline。
 2. custom_fork + 局部可修复问题 → minor，给出 suggested_version_name。
-3. **当被测 evaluated_version 与 base_version 相同**（如均为 v2）且 recommendation=minor 时：必须在 modules[].revision_plan 中分别列出 SFW 与 NSFW 的详细修改计划（不能只写 focus_areas）；创建建议版本时将据此由 AI 自动修订草稿，而非纯复制。
+3. **当 recommendation=minor 时**：无论被测版本是基线还是 custom_fork，都必须在 modules[].revision_plan 中分别列出 SFW 与 NSFW 的详细修改计划（不能只写 focus_areas）；创建建议版本时将据此由 AI 自动修订草稿，而非纯复制。
 4. 系统性策略缺陷或需换 root 基线 → major，target_base_version 只能是 v1 或 v2。
 5. Compress 与 Merge 可分别给出不同 recommendation。
-6. 小版本时 suggested_version_name：字母开头，仅字母数字下划线，不能是 v1、v2。
+6. 小版本命名规范（suggested_version_name）：
+   - 从被测版本 fork，命名采用 parent_version + 下划线 + 递增序号，如从 v2 fork 出 v2_01，从 v2_01 fork 出 v2_02、v2_03 等
+   - 字母开头，仅字母数字下划线，不能是 v1、v2
+   - 语义化后缀亦可（如 v2_refine_grounding），但推荐使用递增序号以保证版本有序
+7. **维持 (hold)** 的明确条件：
+   - 当被测版本所有测评维度均 >85 分且无明确测评 issue 时，应判 hold
+   - 当 revision_plan 中无可提出的具体可执行改进点时，应判 hold
+   - hold 时仍应输出 modules[].focus_areas 作为观察方向，但 revision_plan 可为 null
+8. **基线版本上的修改**：当被测版本是基线（如 v2）且 recommendation=minor 时，revision_plan 中的修订必须基于 modules[].prompt_excerpt 中该基线的实际中文提示词内容，在基线原始文本上进行修改，而非从零开始创作。
 
 revision_plan 每项字段：
 - section：修改位置（如「字段约束」「character_state 说明」「冗余检查规则」）
