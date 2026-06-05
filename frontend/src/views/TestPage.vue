@@ -42,6 +42,7 @@ const {
   registry,
   resolvedRequest,
   selectedModelNames,
+  setSelectedModels,
   syncWithRegistry,
   persistRuntime,
   resolveRequestWithModelFallback,
@@ -368,17 +369,32 @@ function applyRunMeta(run: RpHistoryRunMeta | null | undefined) {
   }
   runtime.value.temperature = run.temperature
   runtime.value.top_k = run.top_k
-  if (run.model) {
-    for (const profile of registry.value.profiles) {
-      if (profile.models.includes(run.model)) {
-        runtime.value.apiProfileId = profile.id
-        runtime.value.modelName = run.model
-        runtime.value.modelNames = [run.model]
-        persistRuntime()
-        break
-      }
+}
+
+function applyHistoryModelSelection(detail: RpHistoryDetail) {
+  const historyModels = (detail.model_runs ?? [])
+    .map((run) => run.model.trim())
+    .filter(Boolean)
+
+  if (historyModels.length === 0) return
+
+  let bestProfileId = runtime.value.apiProfileId
+  let bestValid: string[] = []
+  for (const profile of registry.value.profiles) {
+    const valid = historyModels.filter((model) => profile.models.includes(model))
+    if (valid.length > bestValid.length) {
+      bestValid = valid
+      bestProfileId = profile.id
     }
   }
+
+  if (bestValid.length === 0) {
+    ElMessage.warning('该历史记录中的模型在当前 API 配置中均不可用')
+    return
+  }
+
+  runtime.value.apiProfileId = bestProfileId
+  setSelectedModels(bestValid)
 }
 
 async function applyRpHistoryContext(detail: RpHistoryDetail) {
@@ -575,6 +591,7 @@ async function syncRpHistorySelection(key: string) {
     })
     rpHistoryDetail.value = detail
     await applyRpHistoryContext(detail)
+    applyHistoryModelSelection(detail)
     applyRunMeta(pickRunMetaForPromptType(detail, promptType.value))
     await loadSystemPrompt()
   } catch (error) {

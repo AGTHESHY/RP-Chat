@@ -22,6 +22,7 @@ import { collectVersionSubtree, buildVersionTree, rootBaselineForVersion } from 
 const MarkdownViewer = defineAsyncComponent(
   () => import('../components/MarkdownViewer.vue'),
 )
+import DiffView from '../components/DiffView.vue'
 import PromptViewer from '../components/PromptViewer.vue'
 import AdaptiveTabs from '../components/AdaptiveTabs.vue'
 import {
@@ -34,6 +35,7 @@ import {
   type TranslateConfig,
 } from '../utils/translateConfigStorage'
 import { normalizeBaseUrl } from '../utils/apiConfigStorage'
+import { textsHaveDiff } from '../utils/textDiff'
 
 const route = useRoute()
 const baselineTab = ref<'v1' | 'v2'>('v2')
@@ -45,6 +47,11 @@ const promptType = ref<PromptType>('segment_compress')
 const lang = ref<PromptLang>('zh')
 const promptPart = ref<'sfw' | 'nsfw' | 'preview'>('sfw')
 const previewIncludeNsfw = ref(true)
+const compareViewMode = ref<'diff' | 'edit'>('diff')
+const compareDiffByType = ref<Record<PromptType, boolean>>({
+  segment_compress: false,
+  history_merge: false,
+})
 
 const docContent = ref('')
 const docFilename = ref('')
@@ -131,6 +138,61 @@ const assembledBaselinePreview = computed(() =>
 const assembledEditPreview = computed(() =>
   composePrompt(editSfw.value, editNsfw.value, previewIncludeNsfw.value),
 )
+
+const showCompareDiffMarkers = computed(() => hasCompareBase.value && !isBaseline.value)
+
+const draftHasDiffFromBase = computed(() => {
+  if (!hasCompareBase.value || isBaseline.value) return true
+  if (showCompareDiffMarkers.value) {
+    return (
+      compareDiffByType.value.segment_compress || compareDiffByType.value.history_merge
+    )
+  }
+  return (
+    textsHaveDiff(baselineSfw.value, editSfw.value) ||
+    textsHaveDiff(baselineNsfw.value, editNsfw.value)
+  )
+})
+
+const compareDiffHint = computed(() => {
+  if (!showCompareDiffMarkers.value) return ''
+  const otherType: PromptType =
+    promptType.value === 'segment_compress' ? 'history_merge' : 'segment_compress'
+  const currentHasDiff = compareDiffByType.value[promptType.value]
+  const otherHasDiff = compareDiffByType.value[otherType]
+  if (currentHasDiff) return ''
+  if (otherHasDiff) {
+    return otherType === 'history_merge'
+      ? '当前「Segment 压缩」与基线无差异，请切换到左侧「History 合并」查看修订高亮'
+      : '当前「History 合并」与基线无差异，请切换到左侧「Segment 压缩」查看修订高亮'
+  }
+  return '当前版本与基线内容完全一致，暂无差异可高亮'
+})
+
+async function refreshCompareDiffFlags() {
+  const base = versionMeta.value?.base_version?.trim()
+  if (!base || isBaseline.value) {
+    compareDiffByType.value = { segment_compress: false, history_merge: false }
+    return
+  }
+  const types: PromptType[] = ['segment_compress', 'history_merge']
+  const flags: Record<PromptType, boolean> = {
+    segment_compress: false,
+    history_merge: false,
+  }
+  await Promise.all(
+    types.map(async (type) => {
+      const [basePrompt, curPrompt] = await Promise.all([
+        getVersionPrompt(base, type, lang.value),
+        getVersionPrompt(activeVersion.value, type, lang.value),
+      ])
+      flags[type] =
+        textsHaveDiff(basePrompt.content_sfw, curPrompt.content_sfw) ||
+        textsHaveDiff(basePrompt.content_nsfw, curPrompt.content_nsfw)
+    }),
+  )
+  compareDiffByType.value = flags
+}
 
 function scheduleDraftSave(payload: {
   prompt_type?: PromptType
@@ -223,6 +285,7 @@ async function loadVersionData() {
       editNsfw.value = current.content_nsfw
     }
     draftDirty.value = false
+    await refreshCompareDiffFlags()
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '加载提示词失败')
   } finally {
@@ -241,7 +304,10 @@ async function onPromptContextChange() {
   await loadVersionData()
 }
 
-watch(activeVersion, onVersionChange)
+watch(activeVersion, () => {
+  compareViewMode.value = 'diff'
+  void onVersionChange()
+})
 watch([promptType, lang], onPromptContextChange)
 
 watch(baselineTab, (tab) => {
@@ -484,8 +550,22 @@ onMounted(async () => {
           <div class="type-switch">
             <div class="switch-label">类型</div>
             <el-radio-group v-model="promptType" size="small">
-              <el-radio-button label="segment_compress">Segment 压缩</el-radio-button>
-              <el-radio-button label="history_merge">History 合并</el-radio-button>
+              <el-radio-button label="segment_compress">
+                Segment 压缩
+                <span
+                  v-if="showCompareDiffMarkers && compareDiffByType.segment_compress"
+                  class="type-diff-dot"
+                  title="相对基线有修订"
+                >●</span>
+              </el-radio-button>
+              <el-radio-button label="history_merge">
+                History 合并
+                <span
+                  v-if="showCompareDiffMarkers && compareDiffByType.history_merge"
+                  class="type-diff-dot"
+                  title="相对基线有修订"
+                >●</span>
+              </el-radio-button>
             </el-radio-group>
           </div>
 
@@ -545,6 +625,7 @@ onMounted(async () => {
           </div>
 
           <div v-loading="loading" class="prompt-wrap">
+            <p v-if="compareDiffHint" class="compare-diff-hint">{{ compareDiffHint }}</p>
             <AdaptiveTabs v-model="promptPart" :items="promptPartItems" layout="stretch" />
 
             <div v-if="isBaseline" class="single-prompt">
@@ -577,52 +658,107 @@ onMounted(async () => {
             <div v-else :class="['compare-prompt', { 'compare-prompt--single': !hasCompareBase }]">
               <div v-if="hasCompareBase" class="compare-col">
                 <div class="compare-header">基线 {{ baseVersion }}（只读）</div>
-                <PromptViewer
+                <DiffView
                   v-if="promptPart === 'sfw'"
-                  :model-value="baselineSfw"
+                  :old-text="baselineSfw"
+                  :new-text="editSfw"
+                  :filename="`${baseVersion} · SFW`"
+                  side="old"
                   readonly
                 />
-                <PromptViewer
+                <DiffView
                   v-else-if="promptPart === 'nsfw'"
-                  :model-value="baselineNsfw"
+                  :old-text="baselineNsfw"
+                  :new-text="editNsfw"
+                  :filename="`${baseVersion} · NSFW`"
+                  side="old"
                   readonly
                 />
-                <div v-else class="preview-panel">
-                  <el-scrollbar class="preview-scroll">
-                    <pre class="prompt-pre">{{ assembledBaselinePreview || '暂无内容' }}</pre>
-                  </el-scrollbar>
-                </div>
+                <DiffView
+                  v-else
+                  :old-text="assembledBaselinePreview"
+                  :new-text="assembledEditPreview"
+                  :filename="`${baseVersion} · 拼接预览`"
+                  side="old"
+                  readonly
+                />
               </div>
               <div class="compare-col">
-                <div class="compare-header">
-                  {{ canEditPrompt ? `新版本 ${activeVersion}` : `版本 ${activeVersion}（只读）` }}
+                <div class="compare-header compare-header-row">
+                  <span>
+                    {{ canEditPrompt ? `新版本 ${activeVersion}` : `版本 ${activeVersion}（只读）` }}
+                  </span>
+                  <el-radio-group
+                    v-if="canEditPrompt && hasCompareBase"
+                    v-model="compareViewMode"
+                    size="small"
+                  >
+                    <el-radio-button value="diff">差异高亮</el-radio-button>
+                    <el-radio-button value="edit">编辑</el-radio-button>
+                  </el-radio-group>
                 </div>
-                <PromptViewer
-                  v-if="promptPart === 'sfw'"
-                  v-model="editSfw"
-                  :filename="`${activeVersion} · SFW`"
-                  :readonly="!canEditPrompt"
-                  :show-save="false"
-                />
-                <PromptViewer
-                  v-else-if="promptPart === 'nsfw'"
-                  v-model="editNsfw"
-                  :filename="`${activeVersion} · NSFW`"
-                  :readonly="!canEditPrompt"
-                  :show-save="false"
-                />
-                <div v-else class="preview-panel">
-                  <div class="preview-toolbar">
-                    <el-switch
-                      v-model="previewIncludeNsfw"
-                      active-text="含 NSFW"
-                      inactive-text="仅 SFW"
+                <template v-if="hasCompareBase && (!canEditPrompt || compareViewMode === 'diff')">
+                  <DiffView
+                    v-if="promptPart === 'sfw'"
+                    :old-text="baselineSfw"
+                    :new-text="editSfw"
+                    :filename="`${activeVersion} · SFW`"
+                    side="new"
+                    readonly
+                  />
+                  <DiffView
+                    v-else-if="promptPart === 'nsfw'"
+                    :old-text="baselineNsfw"
+                    :new-text="editNsfw"
+                    :filename="`${activeVersion} · NSFW`"
+                    side="new"
+                    readonly
+                  />
+                  <div v-else class="preview-panel">
+                    <div class="preview-toolbar">
+                      <el-switch
+                        v-model="previewIncludeNsfw"
+                        active-text="含 NSFW"
+                        inactive-text="仅 SFW"
+                      />
+                    </div>
+                    <DiffView
+                      :old-text="assembledBaselinePreview"
+                      :new-text="assembledEditPreview"
+                      :filename="`${activeVersion} · 拼接预览`"
+                      side="new"
+                      readonly
                     />
                   </div>
-                  <el-scrollbar class="preview-scroll">
-                    <pre class="prompt-pre">{{ assembledEditPreview || '暂无内容' }}</pre>
-                  </el-scrollbar>
-                </div>
+                </template>
+                <template v-else>
+                  <PromptViewer
+                    v-if="promptPart === 'sfw'"
+                    v-model="editSfw"
+                    :filename="`${activeVersion} · SFW`"
+                    :readonly="!canEditPrompt"
+                    :show-save="false"
+                  />
+                  <PromptViewer
+                    v-else-if="promptPart === 'nsfw'"
+                    v-model="editNsfw"
+                    :filename="`${activeVersion} · NSFW`"
+                    :readonly="!canEditPrompt"
+                    :show-save="false"
+                  />
+                  <div v-else class="preview-panel">
+                    <div class="preview-toolbar">
+                      <el-switch
+                        v-model="previewIncludeNsfw"
+                        active-text="含 NSFW"
+                        inactive-text="仅 SFW"
+                      />
+                    </div>
+                    <el-scrollbar class="preview-scroll">
+                      <pre class="prompt-pre">{{ assembledEditPreview || '暂无内容' }}</pre>
+                    </el-scrollbar>
+                  </div>
+                </template>
               </div>
             </div>
           </div>
@@ -661,9 +797,20 @@ onMounted(async () => {
               <el-button v-if="isDraft" type="danger" plain @click="discardCurrentDraft">
                 丢弃草稿
               </el-button>
-              <el-button type="primary" :loading="committing" @click="commitToMysql">
-                保存到 MySQL
-              </el-button>
+              <el-tooltip
+                :disabled="draftHasDiffFromBase"
+                content="草稿与基线无差异，请先通过智脑 AI 迭代或手动修改 SP"
+                placement="top"
+              >
+                <el-button
+                  type="primary"
+                  :loading="committing"
+                  :disabled="!draftHasDiffFromBase"
+                  @click="commitToMysql"
+                >
+                  保存到 MySQL
+                </el-button>
+              </el-tooltip>
               <span v-if="lastSavedAt" class="save-hint">Redis 已同步 · {{ lastSavedAt }}</span>
               <span v-else-if="draftDirty" class="save-hint">有未同步修改…</span>
             </div>
@@ -904,6 +1051,24 @@ onMounted(async () => {
   flex-direction: column;
 }
 
+.compare-diff-hint {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #b88230;
+  background: #fdf6ec;
+  border: 1px solid #faecd8;
+  border-radius: 6px;
+}
+
+.type-diff-dot {
+  margin-left: 4px;
+  color: #e6a23c;
+  font-size: 10px;
+  vertical-align: top;
+}
+
 .single-prompt,
 .compare-prompt {
   flex: 1;
@@ -942,10 +1107,26 @@ onMounted(async () => {
 }
 
 .compare-col :deep(.prompt-viewer),
+.compare-col :deep(.diff-view),
 .compare-col .preview-panel {
   flex: 1;
   width: 100%;
   min-height: 0;
+}
+
+.compare-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.preview-panel :deep(.diff-view) {
+  flex: 1;
+  min-height: 0;
+  border: none;
+  border-radius: 0;
 }
 
 .compare-header {

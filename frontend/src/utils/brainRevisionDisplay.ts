@@ -1,38 +1,14 @@
-import type { BrainModuleAdvice, BrainRevisionPlan, BrainRevisionPlanItem } from './parseBrainJson'
+import type { BrainModuleAdvice, BrainRevisionPlan } from './parseBrainJson'
 
-function toPlanItems(lines: string[], sectionPrefix: string): BrainRevisionPlanItem[] {
-  return lines
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => ({
-      section: sectionPrefix,
-      action: 'modify',
-      summary: line,
-      detail: line,
-    }))
-}
-
-/** 智脑未输出 revision_plan 时，用 focus_areas / linked_issues 生成展示与修订依据 */
+/** 仅使用智脑输出的 revision_plan；修订依据由 focus_areas / linked_issues 在 API 层补充 */
 export function resolveRevisionPlan(
   mod: BrainModuleAdvice,
-  linkedIssues: string[] = [],
+  _linkedIssues: string[] = [],
 ): BrainRevisionPlan {
   if (mod.revision_plan && (mod.revision_plan.sfw.length > 0 || mod.revision_plan.nsfw.length > 0)) {
     return mod.revision_plan
   }
-
-  const typeLabel =
-    mod.prompt_type === 'segment_compress' ? 'Segment 压缩' : 'History 合并'
-
-  const sfwFromFocus = toPlanItems(mod.focus_areas, `${typeLabel} · SFW 规则`)
-  const nsfwFromFocus = toPlanItems(mod.focus_areas, `${typeLabel} · NSFW 规则`)
-  const sfwFromIssues = toPlanItems(linkedIssues, `${typeLabel} · 关联问题（SFW）`)
-  const nsfwFromIssues = toPlanItems(linkedIssues, `${typeLabel} · 关联问题（NSFW）`)
-
-  return {
-    sfw: sfwFromFocus.length > 0 ? sfwFromFocus : sfwFromIssues,
-    nsfw: nsfwFromFocus.length > 0 ? nsfwFromFocus : nsfwFromIssues,
-  }
+  return { sfw: [], nsfw: [] }
 }
 
 export function revisionActionLabel(action: string): string {

@@ -506,3 +506,89 @@ def get_rp_history_detail(
         "merge_run": picked["merge_run"] if picked else None,
     }
     return result
+
+
+def delete_rp_history(
+    db: Session,
+    *,
+    user_id: str,
+    role_id: str,
+    app_name: str,
+    run_group_id: int,
+) -> dict[str, Any]:
+    resolved_group = _resolve_run_group_id(
+        db,
+        user_id=user_id,
+        role_id=role_id,
+        app_name=app_name,
+        run_group_id=run_group_id,
+    )
+    rows = (
+        db.query(PromptTestResult)
+        .filter(
+            *_conversation_filter(user_id, role_id, app_name),
+            PromptTestResult.run_group_id == resolved_group,
+        )
+        .all()
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="RP history not found")
+
+    deleted_ids = [row.id for row in rows]
+    for row in rows:
+        db.delete(row)
+    db.commit()
+
+    return {
+        "ok": True,
+        "run_group_id": resolved_group,
+        "deleted_ids": deleted_ids,
+        "deleted_count": len(deleted_ids),
+    }
+
+
+def delete_rp_history_models(
+    db: Session,
+    *,
+    user_id: str,
+    role_id: str,
+    app_name: str,
+    run_group_id: int,
+    models: list[str],
+) -> dict[str, Any]:
+    model_names = [m.strip() for m in models if m and m.strip()]
+    if not model_names:
+        raise HTTPException(status_code=400, detail="models is required")
+
+    resolved_group = _resolve_run_group_id(
+        db,
+        user_id=user_id,
+        role_id=role_id,
+        app_name=app_name,
+        run_group_id=run_group_id,
+    )
+    rows = (
+        db.query(PromptTestResult)
+        .filter(
+            *_conversation_filter(user_id, role_id, app_name),
+            PromptTestResult.run_group_id == resolved_group,
+            PromptTestResult.model.in_(model_names),
+        )
+        .all()
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="RP test model records not found")
+
+    deleted_ids = [row.id for row in rows]
+    for row in rows:
+        db.delete(row)
+    db.commit()
+
+    return {
+        "ok": True,
+        "run_group_id": resolved_group,
+        "models": model_names,
+        "deleted_ids": deleted_ids,
+        "deleted_count": len(deleted_ids),
+    }
+

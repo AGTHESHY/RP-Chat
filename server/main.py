@@ -40,6 +40,8 @@ from rp_eval_service import (
 from seed_bootstrap import bootstrap_seed_data
 from prompt_test_result_service import (
     PromptTestResultSaveRequest,
+    delete_rp_history,
+    delete_rp_history_models,
     get_prompt_test_result,
     get_prompt_test_result_for_conversation,
     get_rp_history_detail,
@@ -68,6 +70,7 @@ from version_service import (
     delete_version_tree,
     discard_draft,
     apply_brain_revision,
+    apply_brain_revision_batch,
     get_doc_content,
     get_prompt_content,
     get_version_meta,
@@ -146,6 +149,22 @@ class BrainRevisionRequest(BaseModel):
     linked_issues: list[str] = Field(default_factory=list)
     rationale: str = ""
     revision_plan: BrainRevisionPlanBody = Field(default_factory=BrainRevisionPlanBody)
+    base_url: str
+    api_key: str
+    model: str
+    temperature: float = 0.3
+
+
+class BrainRevisionModuleBody(BaseModel):
+    prompt_type: str
+    focus_areas: list[str] = Field(default_factory=list)
+    linked_issues: list[str] = Field(default_factory=list)
+    rationale: str = ""
+    revision_plan: BrainRevisionPlanBody = Field(default_factory=BrainRevisionPlanBody)
+
+
+class BrainRevisionBatchRequest(BaseModel):
+    modules: list[BrainRevisionModuleBody] = Field(min_length=1)
     base_url: str
     api_key: str
     model: str
@@ -292,6 +311,36 @@ async def api_apply_brain_revision(
         linked_issues=body.linked_issues,
         rationale=body.rationale,
         revision_plan=plan_dict,
+        base_url=body.base_url,
+        api_key=body.api_key,
+        model=body.model,
+        temperature=body.temperature,
+    )
+
+
+@app.post("/api/versions/{version}/brain-revision-batch")
+async def api_apply_brain_revision_batch(
+    version: str,
+    body: BrainRevisionBatchRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    modules_payload = [
+        {
+            "prompt_type": mod.prompt_type,
+            "focus_areas": mod.focus_areas,
+            "linked_issues": mod.linked_issues,
+            "rationale": mod.rationale,
+            "revision_plan": {
+                "sfw": [item.model_dump() for item in mod.revision_plan.sfw],
+                "nsfw": [item.model_dump() for item in mod.revision_plan.nsfw],
+            },
+        }
+        for mod in body.modules
+    ]
+    return await apply_brain_revision_batch(
+        db,
+        version,
+        modules=modules_payload,
         base_url=body.base_url,
         api_key=body.api_key,
         model=body.model,
@@ -458,6 +507,46 @@ def api_get_rp_history_detail(
         app_name=app_name,
         run_group_id=run_group_id,
         model=model,
+    )
+
+
+@app.delete("/api/rp-history")
+def api_delete_rp_history(
+    user_id: str = Query(...),
+    role_id: str = Query(...),
+    app_name: str = Query(default=""),
+    run_group_id: int = Query(..., ge=1),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return delete_rp_history(
+        db,
+        user_id=user_id,
+        role_id=role_id,
+        app_name=app_name,
+        run_group_id=run_group_id,
+    )
+
+
+class RpHistoryModelsDeleteRequest(BaseModel):
+    user_id: str
+    role_id: str
+    app_name: str = ""
+    run_group_id: int = Field(ge=1)
+    models: list[str] = Field(min_length=1)
+
+
+@app.post("/api/rp-history/delete-models")
+def api_delete_rp_history_models(
+    body: RpHistoryModelsDeleteRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return delete_rp_history_models(
+        db,
+        user_id=body.user_id,
+        role_id=body.role_id,
+        app_name=body.app_name,
+        run_group_id=body.run_group_id,
+        models=body.models,
     )
 
 

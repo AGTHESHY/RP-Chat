@@ -222,6 +222,45 @@ export function getRpHistoryDetail(params: {
   return request<RpHistoryDetail>(`/api/rp-history/detail?${search.toString()}`)
 }
 
+export function deleteRpHistory(params: {
+  user_id: string
+  role_id: string
+  app_name: string
+  run_group_id: number
+}) {
+  const search = new URLSearchParams()
+  search.set('user_id', params.user_id)
+  search.set('role_id', params.role_id)
+  search.set('app_name', params.app_name)
+  search.set('run_group_id', String(params.run_group_id))
+  return request<{
+    ok: boolean
+    run_group_id: number
+    deleted_ids: number[]
+    deleted_count: number
+  }>(`/api/rp-history?${search.toString()}`, { method: 'DELETE' })
+}
+
+export function deleteRpHistoryModels(body: {
+  user_id: string
+  role_id: string
+  app_name: string
+  run_group_id: number
+  models: string[]
+}) {
+  return request<{
+    ok: boolean
+    run_group_id: number
+    models: string[]
+    deleted_ids: number[]
+    deleted_count: number
+  }>('/api/rp-history/delete-models', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
 export interface ChatCompletionRequest {
   base_url: string
   api_key: string
@@ -273,6 +312,18 @@ export interface BrainRevisionRequest extends TranslateRequest {
   linked_issues: string[]
   rationale: string
   revision_plan: BrainRevisionPlanPayload
+}
+
+export interface BrainRevisionBatchModulePayload {
+  prompt_type: 'segment_compress' | 'history_merge'
+  focus_areas: string[]
+  linked_issues: string[]
+  rationale: string
+  revision_plan: BrainRevisionPlanPayload
+}
+
+export interface BrainRevisionBatchRequest extends TranslateRequest {
+  modules: BrainRevisionBatchModulePayload[]
 }
 
 export const NSFW_MARKER = '{{NSFW}}'
@@ -372,7 +423,14 @@ export function translateVersion(version: string, body: TranslateRequest) {
 }
 
 export function applyBrainRevision(version: string, body: BrainRevisionRequest) {
-  return request<{ ok: boolean; version: string; prompt_type: string; revised: string[] }>(
+  return request<{
+    ok: boolean
+    version: string
+    prompt_type: string
+    revised: string[]
+    changed?: boolean
+    changed_fields?: string[]
+  }>(
     `/api/versions/${encodeURIComponent(version)}/brain-revision`,
     {
       method: 'POST',
@@ -380,6 +438,26 @@ export function applyBrainRevision(version: string, body: BrainRevisionRequest) 
       body: JSON.stringify(body),
     },
   )
+}
+
+export function applyBrainRevisionBatch(version: string, body: BrainRevisionBatchRequest) {
+  return request<{
+    ok: boolean
+    version: string
+    modules: Array<{
+      ok: boolean
+      version: string
+      prompt_type: string
+      revised: string[]
+      changed?: boolean
+      changed_fields?: string[]
+    }>
+    changed_fields: string[]
+  }>(`/api/versions/${encodeURIComponent(version)}/brain-revision-batch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
 }
 
 export function discardDraft(version: string) {

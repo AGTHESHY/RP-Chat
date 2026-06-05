@@ -23,6 +23,7 @@ import ThreeColumnPage from '../components/layout/ThreeColumnPage.vue'
 import AppPanel from '../components/layout/AppPanel.vue'
 import FilterBar from '../components/layout/FilterBar.vue'
 import RuntimeParamsFields from '../components/RuntimeParamsFields.vue'
+import RpTestHistoryTable from '../components/RpTestHistoryTable.vue'
 import { formatConfidence, formatHistoryTime } from '../utils/format'
 import {
   formatEvalHistoryLabel,
@@ -152,25 +153,6 @@ function showRuntimeParamsAgain() {
 
 function isModelRunEvaluable(run: RpHistoryModelRun): boolean {
   return Boolean(run.compress || run.merge)
-}
-
-function isModelRunChecked(run: RpHistoryModelRun): boolean {
-  return checkedEvalModels.value.includes(run.model)
-}
-
-function modelRunRowClassName({ row }: { row: RpHistoryModelRun }) {
-  return isModelRunChecked(row) ? 'rp-test-row--selected' : ''
-}
-
-function toggleModelCheck(run: RpHistoryModelRun, checked: boolean) {
-  if (!isModelRunEvaluable(run)) return
-  const set = new Set(checkedEvalModels.value)
-  if (checked) {
-    set.add(run.model)
-  } else {
-    set.delete(run.model)
-  }
-  checkedEvalModels.value = [...set]
 }
 
 function syncDefaultCheckedModels() {
@@ -320,10 +302,19 @@ async function syncRpHistorySelection(key: string) {
   }
 }
 
-function onModelRunRowClick(row: RpHistoryModelRun) {
-  if (!isModelRunEvaluable(row)) return
-  toggleModelCheck(row, !isModelRunChecked(row))
-  historyTab.value = 'rp-test'
+async function onRpTestHistoryDeleted() {
+  const key = selectedRpHistoryKey.value
+  await loadRpHistoryList()
+  if (key && rpHistoryList.value.some((item) => item.history_key === key)) {
+    await syncRpHistorySelection(key)
+  } else if (rpHistoryList.value.length > 0) {
+    selectRpHistory(rpHistoryList.value[0])
+  } else {
+    selectedRpHistoryKey.value = ''
+    rpHistoryDetail.value = null
+    checkedEvalModels.value = []
+  }
+  await loadEvalHistory()
 }
 
 async function loadEvalHistory() {
@@ -599,72 +590,15 @@ onUnmounted(() => {
           <el-tabs v-model="historyTab" class="history-tabs" stretch>
             <el-tab-pane label="RP测试历史" name="rp-test">
               <div ref="modelTablePaneRef" class="history-tab-pane-inner">
-                <p v-if="!selectedRpHistoryKey" class="list-hint tab-pane-hint">
-                  请先在上方选择对话
-                </p>
-                <div v-else class="rp-model-table-wrap">
-                  <el-table
-                    v-loading="detailLoading"
-                    :data="modelRuns"
-                    :max-height="modelTableMaxHeight"
-                    class="eval-table rp-test-table"
-                    size="small"
-                    empty-text="暂无测试记录，请先在 RP 测试页运行"
-                    :row-class-name="modelRunRowClassName"
-                    @row-click="onModelRunRowClick"
-                  >
-                    <el-table-column
-                      prop="model"
-                      label="模型"
-                      :min-width="modelTableCompact ? 64 : 80"
-                      show-overflow-tooltip
-                    />
-                    <el-table-column
-                      label="压缩"
-                      :width="modelTableCompact ? 40 : 48"
-                      align="center"
-                      class-name="col-nowrap"
-                    >
-                      <template #default="{ row }">
-                        {{ row.compress ? '有' : '—' }}
-                      </template>
-                    </el-table-column>
-                    <el-table-column
-                      label="合并"
-                      :width="modelTableCompact ? 40 : 48"
-                      align="center"
-                      class-name="col-nowrap"
-                    >
-                      <template #default="{ row }">
-                        {{ row.merge ? '有' : '—' }}
-                      </template>
-                    </el-table-column>
-                    <el-table-column
-                      label="时间"
-                      :min-width="modelTableCompact ? 56 : 68"
-                      class-name="col-nowrap"
-                    >
-                      <template #default="{ row }">
-                        {{ formatHistoryTime(row.latest_updated_at) }}
-                      </template>
-                    </el-table-column>
-                    <el-table-column
-                      label="对比"
-                      :width="modelTableCompact ? 40 : 44"
-                      align="center"
-                      :fixed="modelTableCompact ? false : 'right'"
-                    >
-                      <template #default="{ row }">
-                        <el-checkbox
-                          :model-value="isModelRunChecked(row)"
-                          :disabled="!isModelRunEvaluable(row)"
-                          @click.stop
-                          @change="(v: boolean) => toggleModelCheck(row, v)"
-                        />
-                      </template>
-                    </el-table-column>
-                  </el-table>
-                </div>
+                <RpTestHistoryTable
+                  :detail="rpHistoryDetail"
+                  :loading="detailLoading"
+                  :checked-models="checkedEvalModels"
+                  :compact="modelTableCompact"
+                  :max-height="modelTableMaxHeight"
+                  @update:checked-models="checkedEvalModels = $event"
+                  @deleted="onRpTestHistoryDeleted"
+                />
               </div>
             </el-tab-pane>
             <el-tab-pane label="测评历史" name="eval">

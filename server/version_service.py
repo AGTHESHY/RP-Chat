@@ -363,12 +363,73 @@ def update_draft(
     return {"ok": True, "version": version, "updated_at": draft["updated_at"]}
 
 
+def _normalize_for_compare(text: str) -> str:
+    return (text or "").replace("\r\n", "\n").strip()
+
+
+def _strip_ai_output(text: str) -> str:
+    cleaned = (text or "").strip()
+    if not cleaned.startswith("```"):
+        return cleaned
+    lines = cleaned.split("\n")
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def _prompt_parts_changed(
+    original_sfw: str,
+    original_nsfw: str,
+    revised_sfw: str,
+    revised_nsfw: str,
+) -> bool:
+    sfw_changed = _normalize_for_compare(original_sfw) != _normalize_for_compare(revised_sfw)
+    nsfw_changed = _normalize_for_compare(original_nsfw) != _normalize_for_compare(revised_nsfw)
+    return sfw_changed or nsfw_changed
+
+
+def draft_differs_from_base(db: Session, version: str) -> tuple[bool, list[str]]:
+    draft = get_draft(version)
+    if not draft:
+        return False, []
+    base = str(draft.get("base_version") or "").strip()
+    if not base:
+        return True, []
+
+    changed_fields: list[str] = []
+    for prompt_type in PROMPT_TYPES:
+        zh_key = prompt_storage_key(prompt_type, "zh")
+        draft_part = draft.get("prompts", {}).get(zh_key) or {}
+        try:
+            base_part = _load_source_prompt(db, base, prompt_type, "zh")
+        except HTTPException:
+            continue
+        if _normalize_for_compare(draft_part.get("content_sfw", "")) != _normalize_for_compare(
+            base_part.get("content_sfw", "")
+        ):
+            changed_fields.append(f"{prompt_type}/sfw")
+        if _normalize_for_compare(draft_part.get("content_nsfw", "")) != _normalize_for_compare(
+            base_part.get("content_nsfw", "")
+        ):
+            changed_fields.append(f"{prompt_type}/nsfw")
+    return len(changed_fields) > 0, changed_fields
+
+
 def commit_version(db: Session, version: str) -> dict[str, Any]:
     validate_writable(version)
 
     draft = get_draft(version)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found in Redis")
+
+    has_diff, changed_fields = draft_differs_from_base(db, version)
+    if not has_diff:
+        raise HTTPException(
+            status_code=400,
+            detail="草稿与基线完全一致，无有效 SP 修订，不允许提交。请通过智脑 AI 迭代或手动修改后再提交。",
+        )
 
     base_version = draft.get("base_version", "")
     prompts_data: dict[str, dict[str, str]] = draft.get("prompts", {})
@@ -565,50 +626,21 @@ def _format_revision_plan_items(items: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-async def _revise_prompt_section(
+async def _call_revision_api(
     base_url: str,
     headers: dict[str, str],
     model: str,
     temperature: float,
     *,
+    system: str,
+    user_content: str,
     section_kind: str,
-    original: str,
-    rationale: str,
-    focus_areas: list[str],
-    linked_issues: list[str],
-    revision_items: list[dict[str, Any]],
 ) -> str:
-    if not original.strip():
-        return original
-
-    plan_text = _format_revision_plan_items(revision_items)
-    focus_text = "\n".join(f"- {x}" for x in focus_areas if str(x).strip())
-    issues_text = "\n".join(f"- {x}" for x in linked_issues if str(x).strip())
-
-    system = (
-        "You are an expert editor for RP Chat memory system prompts (Chinese). "
-        f"Apply ALL listed changes to the ORIGINAL {section_kind} section only. "
-        "Preserve markdown structure, JSON examples, field names, and {{NSFW}} markers "
-        "unless a revision item explicitly requires changing them. "
-        f"Do NOT merge SFW and NSFW content; edit ONLY the {section_kind} section. "
-        "Output ONLY the full revised prompt text. No markdown fences, no explanation."
-    )
-    user_parts = [f"## 修订依据\n{rationale.strip() or '（无）'}"]
-    if focus_text:
-        user_parts.append(f"## 改动方向\n{focus_text}")
-    if issues_text:
-        user_parts.append(f"## 关联测评问题\n{issues_text}")
-    if plan_text:
-        user_parts.append(f"## 修订计划（须逐条落实）\n{plan_text}")
-    else:
-        user_parts.append("## 修订计划\n根据上述改动方向与测评问题，做最小必要修订。")
-    user_parts.append(f"## 原始 {section_kind} 内容\n\n{original}")
-
     payload = {
         "model": model,
         "messages": [
             {"role": "system", "content": system},
-            {"role": "user", "content": "\n\n".join(user_parts)},
+            {"role": "user", "content": user_content},
         ],
         "stream": False,
         "temperature": temperature,
@@ -626,8 +658,107 @@ async def _revise_prompt_section(
 
     data = resp.json()
     content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-    revised = content.strip()
-    return revised or original
+    return _strip_ai_output(content)
+
+
+async def _revise_prompt_section(
+    base_url: str,
+    headers: dict[str, str],
+    model: str,
+    temperature: float,
+    *,
+    section_kind: str,
+    original: str,
+    rationale: str,
+    focus_areas: list[str],
+    linked_issues: list[str],
+    revision_items: list[dict[str, Any]],
+    require_change: bool = True,
+) -> tuple[str, bool]:
+    plan_text = _format_revision_plan_items(revision_items)
+    focus_text = "\n".join(f"- {x}" for x in focus_areas if str(x).strip())
+    issues_text = "\n".join(f"- {x}" for x in linked_issues if str(x).strip())
+    has_instructions = bool(plan_text or focus_text or issues_text)
+
+    if not original.strip() and not has_instructions:
+        return original, False
+
+    if not original.strip() and has_instructions:
+        original = ""
+
+    base_system = (
+        "You are an expert editor for RP Chat memory system prompts (Chinese). "
+        f"Your task is to revise the ORIGINAL {section_kind} section based on RP evaluation findings. "
+        "You MUST implement every revision item — the output MUST differ from the original in meaningful ways. "
+        "Preserve overall markdown structure, JSON examples, field names, and {{NSFW}} markers "
+        "unless a revision item explicitly requires changing them. "
+        f"Do NOT merge SFW and NSFW content; edit ONLY the {section_kind} section. "
+        "Output ONLY the full revised prompt text. No markdown fences, no explanation, no preamble."
+    )
+
+    user_parts = [f"## 修订依据\n{rationale.strip() or '（无）'}"]
+    if focus_text:
+        user_parts.append(f"## 改动方向\n{focus_text}")
+    if issues_text:
+        user_parts.append(f"## 关联测评问题（必须针对性修复）\n{issues_text}")
+    if plan_text:
+        user_parts.append(f"## 修订计划（须逐条落实，不得遗漏）\n{plan_text}")
+    else:
+        user_parts.append(
+            "## 修订计划\n"
+            "根据上述改动方向与测评问题，对原始 SP 做最小但**可观测**的必要修订；"
+            "禁止原样返回。"
+        )
+    user_parts.append(f"## 原始 {section_kind} 内容\n\n{original}")
+    user_content = "\n\n".join(user_parts)
+
+    revised = original
+    changed = False
+    max_attempts = 3
+
+    for attempt in range(max_attempts):
+        retry_note = ""
+        if attempt > 0:
+            retry_note = (
+                "\n\n【重要】你上一轮的输出与原文完全相同或几乎相同，这是不可接受的。"
+                "请逐条落实修订计划，确保输出相对原文有明确、可读的改动（增删改措辞或规则）。"
+            )
+        attempt_system = base_system
+        if attempt > 0:
+            attempt_system += (
+                " CRITICAL: Your previous attempt failed because it was identical to the original. "
+                "You MUST produce a visibly different revision."
+            )
+        attempt_temp = min(temperature + attempt * 0.15, 1.0)
+
+        candidate = await _call_revision_api(
+            base_url,
+            headers,
+            model,
+            attempt_temp,
+            system=attempt_system,
+            user_content=user_content + retry_note,
+            section_kind=section_kind,
+        )
+        if not candidate:
+            candidate = original
+
+        if _normalize_for_compare(candidate) != _normalize_for_compare(original):
+            revised = candidate
+            changed = True
+            break
+        revised = candidate
+
+    if require_change and has_instructions and not changed:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{section_kind} 修订失败：AI 输出与原文无有效差异。"
+                "请检查 API 模型能力或智脑修订计划是否足够具体。"
+            ),
+        )
+
+    return revised, changed
 
 
 async def apply_brain_revision(
@@ -670,7 +801,14 @@ async def apply_brain_revision(
     original_sfw = str(zh_part.get("content_sfw") or "")
     original_nsfw = str(zh_part.get("content_nsfw") or "")
 
-    revised_sfw = await _revise_prompt_section(
+    has_shared = bool(focus_areas or linked_issues)
+    sfw_require_change = bool(sfw_items) or (has_shared and not nsfw_items)
+    nsfw_require_change = bool(nsfw_items) or (has_shared and not sfw_items)
+    if has_shared and not sfw_items and not nsfw_items:
+        sfw_require_change = True
+        nsfw_require_change = True
+
+    revised_sfw, sfw_changed = await _revise_prompt_section(
         base_url,
         headers,
         model,
@@ -681,8 +819,9 @@ async def apply_brain_revision(
         focus_areas=focus_areas,
         linked_issues=linked_issues,
         revision_items=sfw_items,
+        require_change=sfw_require_change,
     )
-    revised_nsfw = await _revise_prompt_section(
+    revised_nsfw, nsfw_changed = await _revise_prompt_section(
         base_url,
         headers,
         model,
@@ -693,7 +832,17 @@ async def apply_brain_revision(
         focus_areas=focus_areas,
         linked_issues=linked_issues,
         revision_items=nsfw_items,
+        require_change=nsfw_require_change,
     )
+
+    if not _prompt_parts_changed(original_sfw, original_nsfw, revised_sfw, revised_nsfw):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{prompt_type} 模块修订无效：SFW/NSFW 均与修订前相同。"
+                "智脑迭代必须产生相对测评结论的可观测 SP 改进。"
+            ),
+        )
 
     update_draft(
         db,
@@ -704,11 +853,15 @@ async def apply_brain_revision(
         content_nsfw=revised_nsfw,
     )
 
-    # 同步修订 EN：将修订后的 ZH 翻译为 EN 并写回 draft
     en_key = prompt_storage_key(prompt_type, "en")
     en_part = draft.get("prompts", {}).get(en_key)
     has_en = bool(en_part and (en_part.get("content_sfw") or en_part.get("content_nsfw")))
     revised_keys = ["content_sfw", "content_nsfw"]
+    changed_fields: list[str] = []
+    if sfw_changed:
+        changed_fields.append("sfw")
+    if nsfw_changed:
+        changed_fields.append("nsfw")
 
     if has_en or revised_sfw.strip() or revised_nsfw.strip():
         try:
@@ -731,13 +884,89 @@ async def apply_brain_revision(
             revised_keys.append("en_content_sfw")
             revised_keys.append("en_content_nsfw")
         except Exception:
-            pass  # 翻译失败不影响 ZH 修订结果
+            pass
 
     return {
         "ok": True,
         "version": version,
         "prompt_type": prompt_type,
         "revised": revised_keys,
+        "changed": True,
+        "changed_fields": changed_fields,
+    }
+
+
+def _append_revision_changelog(version: str, entries: list[str]) -> None:
+    if not entries:
+        return
+    draft = get_draft(version)
+    if not draft:
+        return
+    doc = str(draft.get("doc_content") or "")
+    block = "\n\n## AI 智脑修订记录\n" + "\n".join(f"- {entry}" for entry in entries)
+    draft["doc_content"] = doc + block
+    draft["updated_at"] = datetime.now(timezone.utc).isoformat()
+    save_draft(version, draft)
+
+
+async def apply_brain_revision_batch(
+    db: Session,
+    version: str,
+    *,
+    modules: list[dict[str, Any]],
+    base_url: str,
+    api_key: str,
+    model: str,
+    temperature: float = 0.3,
+) -> dict[str, Any]:
+    if not modules:
+        raise HTTPException(status_code=400, detail="至少需要一个待修订模块")
+
+    validate_writable(version)
+    if not get_draft(version):
+        raise HTTPException(status_code=404, detail="Draft not found in Redis")
+
+    results: list[dict[str, Any]] = []
+    changelog_entries: list[str] = []
+
+    for mod in modules:
+        prompt_type = str(mod.get("prompt_type") or "").strip()
+        if prompt_type not in PROMPT_TYPES:
+            raise HTTPException(status_code=400, detail=f"Invalid prompt type: {prompt_type}")
+
+        plan = mod.get("revision_plan") if isinstance(mod.get("revision_plan"), dict) else {}
+        result = await apply_brain_revision(
+            db,
+            version,
+            prompt_type=prompt_type,
+            focus_areas=list(mod.get("focus_areas") or []),
+            linked_issues=list(mod.get("linked_issues") or []),
+            rationale=str(mod.get("rationale") or ""),
+            revision_plan=plan,
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            temperature=temperature,
+        )
+        results.append(result)
+        label = "Segment 压缩" if prompt_type == "segment_compress" else "History 合并"
+        fields = ", ".join(result.get("changed_fields") or [])
+        changelog_entries.append(f"{label}（{fields or 'zh'}）已根据测评结论完成 AI 修订")
+
+    has_diff, changed_fields = draft_differs_from_base(db, version)
+    if not has_diff:
+        raise HTTPException(
+            status_code=422,
+            detail="批量修订完成但与基线仍无差异，不允许保留此草稿。",
+        )
+
+    _append_revision_changelog(version, changelog_entries)
+
+    return {
+        "ok": True,
+        "version": version,
+        "modules": results,
+        "changed_fields": changed_fields,
     }
 
 
