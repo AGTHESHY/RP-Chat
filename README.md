@@ -6,7 +6,9 @@ Vue 3 + FastAPI 全栈应用，用于浏览 v1/v2 提示词、查看版本文档
 
 - `server/` — FastAPI 后端（提示词、测试用例存储在 MySQL）
 - `frontend/` — Vue 3 前端
-- `docker-compose.yml` — MySQL 8.0（端口 3306）
+- `docker-compose.yml` — MySQL 8.0（端口 3306）、Redis 7（端口 6380）
+- `docker-compose.lowmem.yml` — 2GB 内存环境的资源限制与精简配置
+- `scripts/docker-up-serial.sh` — 低内存环境串行启动脚本
 
 ## 数据库
 
@@ -31,10 +33,29 @@ Vue 3 + FastAPI 全栈应用，用于浏览 v1/v2 提示词、查看版本文档
 
 可通过环境变量覆盖：`MYSQL_HOST`、`MYSQL_PORT`、`MYSQL_USER`、`MYSQL_PASSWORD`、`MYSQL_DATABASE`。
 
-### 启动 MySQL（Docker）
+### 启动 MySQL + Redis（Docker）
+
+**常规环境**（内存充足，可并行启动）：
 
 ```bash
 docker compose up -d
+```
+
+**低内存环境**（如 2GB Ubuntu，建议串行启动，避免同时拉镜像/初始化导致 OOM）：
+
+```bash
+chmod +x scripts/docker-up-serial.sh
+bash scripts/docker-up-serial.sh
+```
+
+脚本会按顺序执行：先启动并等待 MySQL 就绪，再启动 Redis；并自动加载 `docker-compose.lowmem.yml` 中的内存限制与精简参数。
+
+若需手动分步：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.lowmem.yml up -d mysql
+# 等待 MySQL 健康后再执行
+docker compose -f docker-compose.yml -f docker-compose.lowmem.yml up -d redis
 ```
 
 后端启动时会自动建表（若不存在）。
