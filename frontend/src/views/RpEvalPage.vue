@@ -50,6 +50,7 @@ import {
   resetRpEvalSystemPrompt,
   saveRpEvalSystemPrompt,
 } from '../utils/rpEvalPromptStorage'
+import { filterEvaluationsForTask } from '../utils/rpTaskMatch'
 
 const evalRuntime = usePageRuntime('eval')
 const { runtime, resolvedRequest, syncWithRegistry } = evalRuntime
@@ -333,11 +334,12 @@ async function loadEvalHistory() {
   }
   evalHistoryLoading.value = true
   try {
-    evalHistory.value = await listRpEvaluations({
+    const all = await listRpEvaluations({
       user_id: detail.user_id,
       role_id: detail.role_id,
       app_name: detail.app_name,
     })
+    evalHistory.value = filterEvaluationsForTask(all, detail)
   } catch (error) {
     evalHistory.value = []
     ElMessage.error(error instanceof Error ? error.message : '加载测评历史失败')
@@ -465,6 +467,7 @@ async function handleRunEval() {
       temperature: requestConfig.temperature,
       eval_mode: evalMode,
       evaluated_models: evaluatedModels,
+      run_group_id: detail.run_group_id,
     })
 
     selectedEvalId.value = saved.id

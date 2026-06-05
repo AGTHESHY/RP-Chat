@@ -135,6 +135,7 @@ class RpEvalResult(Base):
     overall_confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     eval_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="single")
     evaluated_models: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    run_group_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0, index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         server_default=func.now(),

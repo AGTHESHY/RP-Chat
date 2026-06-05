@@ -61,6 +61,10 @@ import {
   formatEvalPromptVersions,
 } from '../utils/rpEvalFormat'
 import { formatConfidence, formatHistoryTime } from '../utils/format'
+import {
+  filterBrainAnalysesForTask,
+  filterEvaluationsForTask,
+} from '../utils/rpTaskMatch'
 
 const brainRuntime = usePageRuntime('brain')
 const { runtime, resolvedRequest, syncWithRegistry } = brainRuntime
@@ -265,11 +269,12 @@ async function loadEvalHistory() {
   const detail = rpHistoryDetail.value
   evalHistoryLoading.value = true
   try {
-    evalHistory.value = await listRpEvaluations({
+    const all = await listRpEvaluations({
       user_id: detail.user_id,
       role_id: detail.role_id,
       app_name: detail.app_name,
     })
+    evalHistory.value = filterEvaluationsForTask(all, detail)
   } catch (error) {
     evalHistory.value = []
     ElMessage.error(error instanceof Error ? error.message : '加载测评历史失败')
@@ -286,11 +291,13 @@ async function loadBrainHistory() {
   const detail = rpHistoryDetail.value
   brainHistoryLoading.value = true
   try {
-    brainHistory.value = await listBrainAnalyses({
+    const taskEvalIds = new Set(evalHistory.value.map((row) => row.id))
+    const all = await listBrainAnalyses({
       user_id: detail.user_id,
       role_id: detail.role_id,
       app_name: detail.app_name,
     })
+    brainHistory.value = filterBrainAnalysesForTask(all, detail, taskEvalIds)
   } catch (error) {
     brainHistory.value = []
     ElMessage.error(error instanceof Error ? error.message : '加载智脑历史失败')
@@ -531,6 +538,7 @@ async function handleRunBrain() {
       temperature: requestConfig.temperature,
       eval_mode: evalMode,
       evaluated_models: evalDetail.evaluated_models ?? [],
+      run_group_id: rpHistoryDetail.value?.run_group_id ?? evalDetail.run_group_id ?? 0,
     })
 
     await loadBrainHistory()

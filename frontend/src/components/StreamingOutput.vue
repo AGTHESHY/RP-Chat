@@ -9,17 +9,26 @@ const props = defineProps<{
 
 const reasoningExpanded = ref<string[]>(['reasoning'])
 const scrollRef = ref<HTMLElement | null>(null)
+const reasoningScrollRef = ref<HTMLElement | null>(null)
 
 async function scrollToBottom() {
   await nextTick()
-  const el = scrollRef.value
-  if (el) {
-    el.scrollTop = el.scrollHeight
+  for (const el of [scrollRef.value, reasoningScrollRef.value]) {
+    if (el) {
+      el.scrollTop = el.scrollHeight
+    }
   }
 }
 
 watch(
-  () => [props.content, props.reasoning],
+  () => props.content,
+  () => {
+    void scrollToBottom()
+  },
+)
+
+watch(
+  () => props.reasoning,
   () => {
     void scrollToBottom()
   },
@@ -38,7 +47,9 @@ watch(
         <template #title>
           <span class="reasoning-title">推理过程</span>
         </template>
-        <pre class="reasoning-pre">{{ reasoning }}</pre>
+        <div ref="reasoningScrollRef" class="reasoning-scroll">
+          <pre class="reasoning-pre">{{ reasoning }}</pre>
+        </div>
       </el-collapse-item>
     </el-collapse>
 
@@ -85,10 +96,51 @@ watch(
 }
 
 .streaming-reasoning {
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: min(42vh, 300px);
   border-radius: 6px;
   background: #f7f8fa;
   padding: 0 10px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.streaming-reasoning :deep(.el-collapse-item__wrap) {
+  overflow: hidden;
+}
+
+.streaming-reasoning :deep(.el-collapse-item__content) {
+  padding: 0 0 6px;
+}
+
+.reasoning-scroll {
+  max-height: min(36vh, 260px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  box-sizing: border-box;
+  /* 右侧留空给滚动条，底部留空防末行被裁切 */
+  padding: 2px 16px 12px 2px;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(144, 147, 153, 0.55) transparent;
+}
+
+.reasoning-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.reasoning-scroll::-webkit-scrollbar-track {
+  background: transparent;
+  margin: 2px 0;
+}
+
+.reasoning-scroll::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: rgba(144, 147, 153, 0.45);
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 
 .reasoning-title {
@@ -98,8 +150,10 @@ watch(
 
 .reasoning-pre {
   margin: 0;
+  padding: 0;
   white-space: pre-wrap;
   word-break: break-word;
+  overflow-wrap: anywhere;
   font-size: 12px;
   line-height: 1.6;
   color: #909399;
@@ -108,16 +162,39 @@ watch(
 .streaming-body {
   flex: 1;
   min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
+  box-sizing: border-box;
   border-radius: 6px;
   background: #fafafa;
-  padding: 10px 12px;
+  padding: 10px 16px 14px 12px;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(144, 147, 153, 0.55) transparent;
+}
+
+.streaming-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.streaming-body::-webkit-scrollbar-track {
+  background: transparent;
+  margin: 2px 0;
+}
+
+.streaming-body::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: rgba(144, 147, 153, 0.45);
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 
 .streaming-pre {
   margin: 0;
+  padding: 0;
   white-space: pre-wrap;
   word-break: break-word;
+  overflow-wrap: anywhere;
   font-size: 13px;
   line-height: 1.65;
   color: #303133;

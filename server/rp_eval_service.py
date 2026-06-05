@@ -29,6 +29,7 @@ class RpEvalSaveRequest(BaseModel):
     temperature: float = 0.0
     eval_mode: str = "single"
     evaluated_models: list[str] = Field(default_factory=list)
+    run_group_id: int = Field(default=0, ge=0)
 
 
 def _extract_overall(eval_result: dict[str, Any]) -> tuple[int, float]:
@@ -116,6 +117,7 @@ def _row_to_summary(row: RpEvalResult) -> dict[str, Any]:
         "model": row.model or "",
         "eval_mode": getattr(row, "eval_mode", None) or "single",
         "evaluated_models": evaluated_models,
+        "run_group_id": int(getattr(row, "run_group_id", 0) or 0),
         "overall_score": row.overall_score,
         "overall_confidence": row.overall_confidence,
         "created_at": row.created_at.isoformat() if row.created_at else None,
@@ -160,6 +162,7 @@ def create_rp_eval(db: Session, body: RpEvalSaveRequest) -> dict[str, Any]:
         overall_confidence=overall_confidence,
         eval_mode=eval_mode,
         evaluated_models=json.dumps(evaluated_models, ensure_ascii=False),
+        run_group_id=int(body.run_group_id or 0),
     )
     db.add(row)
     db.commit()
@@ -173,17 +176,16 @@ def list_rp_evaluations(
     user_id: str,
     role_id: str,
     app_name: str = "",
+    run_group_id: Optional[int] = None,
 ) -> list[dict[str, Any]]:
-    rows = (
-        db.query(RpEvalResult)
-        .filter(
-            RpEvalResult.user_id == user_id.strip(),
-            RpEvalResult.role_id == role_id.strip(),
-            RpEvalResult.app_name == app_name.strip(),
-        )
-        .order_by(RpEvalResult.created_at.desc(), RpEvalResult.id.desc())
-        .all()
+    query = db.query(RpEvalResult).filter(
+        RpEvalResult.user_id == user_id.strip(),
+        RpEvalResult.role_id == role_id.strip(),
+        RpEvalResult.app_name == app_name.strip(),
     )
+    if run_group_id is not None:
+        query = query.filter(RpEvalResult.run_group_id == run_group_id)
+    rows = query.order_by(RpEvalResult.created_at.desc(), RpEvalResult.id.desc()).all()
     return [_row_to_summary(row) for row in rows]
 
 

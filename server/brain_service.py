@@ -36,6 +36,7 @@ class BrainSaveRequest(BaseModel):
     temperature: float = 0.0
     eval_mode: str = "single"
     evaluated_models: list[str] = Field(default_factory=list)
+    run_group_id: int = Field(default=0, ge=0)
 
 
 def _normalize_overall(raw: str) -> str:
@@ -59,6 +60,7 @@ def _to_summary(record: dict[str, Any]) -> dict[str, Any]:
         "model": record.get("model", ""),
         "eval_mode": record.get("eval_mode", "single"),
         "evaluated_models": record.get("evaluated_models", []),
+        "run_group_id": int(record.get("run_group_id", 0) or 0),
         "created_at": record.get("created_at"),
     }
 
@@ -98,6 +100,7 @@ def create_brain_analysis(body: BrainSaveRequest) -> dict[str, Any]:
         "temperature": body.temperature,
         "eval_mode": (body.eval_mode or "single").strip() or "single",
         "evaluated_models": body.evaluated_models or [],
+        "run_group_id": int(body.run_group_id or 0),
         "created_at": utc_now_iso(),
         "_created_ts": time.time(),
     }
@@ -110,12 +113,16 @@ def list_brain_analyses(
     user_id: str,
     role_id: str,
     app_name: str = "",
+    run_group_id: Optional[int] = None,
 ) -> list[dict[str, Any]]:
     summaries: list[dict[str, Any]] = []
     for record_id in list_brain_record_ids(user_id, role_id, app_name):
         record = get_brain_record(record_id)
         if not record:
             continue
+        if run_group_id is not None:
+            if int(record.get("run_group_id", 0) or 0) != run_group_id:
+                continue
         summaries.append(_to_summary(record))
     return summaries
 

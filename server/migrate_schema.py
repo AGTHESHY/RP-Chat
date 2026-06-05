@@ -390,8 +390,10 @@ def migrate_rp_eval_schema(db: Session) -> None:
                         overall_confidence DOUBLE NOT NULL DEFAULT 0,
                         eval_mode VARCHAR(32) NOT NULL DEFAULT 'single',
                         evaluated_models LONGTEXT NOT NULL DEFAULT '[]',
+                        run_group_id INT NOT NULL DEFAULT 0,
                         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                         INDEX idx_rp_eval_conv (user_id, role_id, app_name),
+                        INDEX idx_rp_eval_run_group (user_id, role_id, app_name, run_group_id),
                         INDEX idx_rp_eval_created (created_at)
                     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
                     """
@@ -420,9 +422,22 @@ def migrate_rp_eval_schema(db: Session) -> None:
                 "ADD COLUMN evaluated_models LONGTEXT NOT NULL "
                 "DEFAULT '[]' AFTER eval_mode"
             )
+        if "run_group_id" not in columns:
+            alters.append(
+                "ADD COLUMN run_group_id INT NOT NULL DEFAULT 0 AFTER evaluated_models"
+            )
         if alters:
             with engine.begin() as conn:
                 conn.execute(text(f"ALTER TABLE rp_eval_results {', '.join(alters)}"))
+        indexes = {idx["name"] for idx in inspector.get_indexes("rp_eval_results")}
+        if "idx_rp_eval_run_group" not in indexes:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "CREATE INDEX idx_rp_eval_run_group ON rp_eval_results "
+                        "(user_id, role_id, app_name, run_group_id)"
+                    )
+                )
 
 
 def migrate_brain_schema(db: Session) -> None:

@@ -727,6 +727,7 @@ export interface RpEvalSummary {
   model: string
   eval_mode: 'single' | 'multi_compare'
   evaluated_models: string[]
+  run_group_id?: number
   overall_score: number
   overall_confidence: number
   created_at: string | null
@@ -759,17 +760,22 @@ export interface RpEvalSavePayload {
   temperature: number
   eval_mode?: 'single' | 'multi_compare'
   evaluated_models?: string[]
+  run_group_id?: number
 }
 
 export function listRpEvaluations(params: {
   user_id: string
   role_id: string
   app_name: string
+  run_group_id?: number
 }) {
   const search = new URLSearchParams()
   search.set('user_id', params.user_id)
   search.set('role_id', params.role_id)
   search.set('app_name', params.app_name)
+  if (params.run_group_id != null) {
+    search.set('run_group_id', String(params.run_group_id))
+  }
   return request<RpEvalSummary[]>(`/api/rp-evaluations?${search.toString()}`)
 }
 
@@ -808,6 +814,7 @@ export interface BrainAnalysisSummary {
   model: string
   eval_mode?: 'single' | 'multi_compare'
   evaluated_models?: string[]
+  run_group_id?: number
   created_at: string | null
 }
 
@@ -837,17 +844,22 @@ export interface BrainSavePayload {
   temperature: number
   eval_mode?: 'single' | 'multi_compare'
   evaluated_models?: string[]
+  run_group_id?: number
 }
 
 export function listBrainAnalyses(params: {
   user_id: string
   role_id: string
   app_name: string
+  run_group_id?: number
 }) {
   const search = new URLSearchParams()
   search.set('user_id', params.user_id)
   search.set('role_id', params.role_id)
   search.set('app_name', params.app_name)
+  if (params.run_group_id != null) {
+    search.set('run_group_id', String(params.run_group_id))
+  }
   return request<BrainAnalysisSummary[]>(`/api/brain-analyses?${search.toString()}`)
 }
 

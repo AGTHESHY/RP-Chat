@@ -467,6 +467,7 @@ def api_list_rp_evaluations(
     user_id: str = Query(...),
     role_id: str = Query(...),
     app_name: str = Query(default=""),
+    run_group_id: Optional[int] = Query(default=None),
     db: Session = Depends(get_db),
 ) -> list[dict[str, Any]]:
     return list_rp_evaluations(
@@ -474,6 +475,7 @@ def api_list_rp_evaluations(
         user_id=user_id,
         role_id=role_id,
         app_name=app_name,
+        run_group_id=run_group_id,
     )
 
 
@@ -500,11 +502,13 @@ def api_list_brain_analyses(
     user_id: str = Query(...),
     role_id: str = Query(...),
     app_name: str = Query(default=""),
+    run_group_id: Optional[int] = Query(default=None),
 ) -> list[dict[str, Any]]:
     return list_brain_analyses(
         user_id=user_id,
         role_id=role_id,
         app_name=app_name,
+        run_group_id=run_group_id,
     )
 
 
