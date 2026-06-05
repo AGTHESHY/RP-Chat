@@ -1,6 +1,7 @@
 import { computed, ref, watch } from 'vue'
 import {
   defaultRuntimeConfig,
+  getFirstProfile,
   loadPageRuntime,
   normalizeRuntimeConfig,
   resolveRuntimeRequest,
@@ -56,6 +57,16 @@ function createPageRuntime(scope: RuntimeScope) {
     persistRuntime()
   }
 
+  /** 选中当前 API 下按字典序排列的第一个模型 */
+  function resetToFirstModelSelection() {
+    const profile = getProfile(runtime.value.apiProfileId) ?? getFirstProfile(registry.value)
+    if (!profile) return
+    const first = [...profile.models].sort((a, b) => a.localeCompare(b))[0]
+    if (!first) return
+    runtime.value.apiProfileId = profile.id
+    setSelectedModels([first])
+  }
+
   function toggleModelSelection(modelName: string, checked: boolean) {
     const profile = getProfile(runtime.value.apiProfileId)
     if (!profile || !profile.models.includes(modelName)) return
@@ -78,17 +89,22 @@ function createPageRuntime(scope: RuntimeScope) {
   })
 
   const selectedModelNames = computed(() => {
-    const names = runtime.value.modelNames ?? []
-    if (names.length > 0) return names
+    if (Array.isArray(runtime.value.modelNames)) {
+      return runtime.value.modelNames
+    }
     return runtime.value.modelName ? [runtime.value.modelName] : []
   })
 
-  const hasValidRuntime = computed(() => {
+  const hasConfiguredApi = computed(() => {
     if (!currentProfile.value?.base_url.trim() || !currentProfile.value?.api_key.trim()) {
       return false
     }
-    return selectedModelNames.value.length > 0
+    return true
   })
+
+  const hasValidRuntime = computed(
+    () => hasConfiguredApi.value && selectedModelNames.value.length > 0,
+  )
 
   const resolvedRequest = computed(() => resolveRuntimeRequest(registry.value, runtime.value))
 
@@ -122,11 +138,13 @@ function createPageRuntime(scope: RuntimeScope) {
     currentProfile,
     availableModels,
     hasValidRuntime,
+    hasConfiguredApi,
     resolvedRequest,
     switchProfile,
     switchModel,
     selectedModelNames,
     setSelectedModels,
+    resetToFirstModelSelection,
     toggleModelSelection,
     syncWithRegistry,
     persistRuntime,

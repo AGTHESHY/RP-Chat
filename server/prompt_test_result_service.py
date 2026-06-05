@@ -374,6 +374,11 @@ def _resolve_run_group_id(
     return max(latest_by_group.keys(), key=lambda gid: latest_by_group[gid] or "")
 
 
+def _history_group_key(row: PromptTestResult) -> tuple[str, str, str, int]:
+    run_group_id = int(row.run_group_id or row.id)
+    return (row.user_id, row.role_id, row.app_name, run_group_id)
+
+
 def list_rp_history(
     db: Session,
     *,
@@ -400,14 +405,15 @@ def list_rp_history(
         PromptTestResult.id.desc(),
     ).all()
 
-    grouped: dict[int, dict[str, Any]] = {}
-    rows_per_group: dict[int, list[PromptTestResult]] = defaultdict(list)
+    grouped: dict[tuple[str, str, str, int], dict[str, Any]] = {}
+    rows_per_group: dict[tuple[str, str, str, int], list[PromptTestResult]] = defaultdict(list)
 
     for row in rows:
-        run_group_id = int(row.run_group_id or row.id)
+        group_key = _history_group_key(row)
+        run_group_id = group_key[3]
         conv_key = _conversation_key(row.user_id, row.role_id, row.app_name)
         entry = grouped.setdefault(
-            run_group_id,
+            group_key,
             {
                 "conversation_key": conv_key,
                 "history_key": _history_key(row.user_id, row.role_id, row.app_name, run_group_id),
@@ -425,20 +431,17 @@ def list_rp_history(
                 "model_count": 0,
             },
         )
-        entry["role_name"] = row.role_name
-        if not entry["prompt_version"] and row.prompt_version:
-            entry["prompt_version"] = row.prompt_version
         if row.prompt_type == "segment_compress":
             entry["has_compress"] = True
         elif row.prompt_type == "history_merge":
             entry["has_merge"] = True
-        rows_per_group[run_group_id].append(row)
+        rows_per_group[group_key].append(row)
         ts = row.updated_at.isoformat() if row.updated_at else None
         if ts and (not entry["latest_updated_at"] or ts > entry["latest_updated_at"]):
             entry["latest_updated_at"] = ts
 
-    for run_group_id, entry in grouped.items():
-        display_runs = _build_model_runs(rows_per_group[run_group_id])
+    for group_key, entry in grouped.items():
+        display_runs = _build_model_runs(rows_per_group[group_key])
         entry["model_count"] = len(display_runs)
         if not display_runs:
             entry["has_compress"] = False

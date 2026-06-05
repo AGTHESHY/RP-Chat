@@ -242,15 +242,20 @@ export function normalizeRuntimeConfig(
   if (!first) {
     return { ...defaultRuntimeConfig }
   }
-  let profile = getProfileById(registry, runtime.apiProfileId) ?? first
-  const modelName = pickModelForProfile(profile, runtime.modelName)
-  const rawNames = Array.isArray(runtime.modelNames) ? runtime.modelNames : []
-  const modelNames = rawNames.filter((m) => profile.models.includes(m))
-  const effectiveNames =
-    modelNames.length > 0 ? modelNames : modelName ? [modelName] : []
+  const profile = getProfileById(registry, runtime.apiProfileId) ?? first
+  const hasExplicitList = Array.isArray(runtime.modelNames)
+  let effectiveNames: string[]
+  if (hasExplicitList) {
+    effectiveNames = runtime.modelNames!.filter((m) => profile.models.includes(m))
+  } else {
+    const sortedFirst =
+      [...profile.models].sort((a, b) => a.localeCompare(b))[0] ??
+      pickModelForProfile(profile, runtime.modelName)
+    effectiveNames = sortedFirst ? [sortedFirst] : []
+  }
   return {
     apiProfileId: profile.id,
-    modelName: effectiveNames[0] ?? modelName,
+    modelName: effectiveNames[0] ?? '',
     modelNames: effectiveNames,
     temperature: runtime.temperature ?? defaultRuntimeConfig.temperature,
     top_k: runtime.top_k ?? defaultRuntimeConfig.top_k,

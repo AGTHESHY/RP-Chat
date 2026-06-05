@@ -22,7 +22,7 @@ const {
   currentProfile,
   availableModels,
   selectedModelNames,
-  hasValidRuntime,
+  hasConfiguredApi,
   switchProfile,
   switchModel,
   toggleModelSelection,
@@ -48,11 +48,11 @@ const apiDisplayHost = computed(() =>
 const modelDisplay = computed(() => {
   if (props.multiSelect) {
     const names = selectedModelNames.value
-    if (names.length === 0) return '未选择'
+    if (names.length === 0) return ''
     if (names.length === 1) return names[0]
     return `已选择 ${names.length} 个模型`
   }
-  return runtime.value.modelName || '未选择'
+  return runtime.value.modelName || ''
 })
 
 function isModelChecked(model: string) {
@@ -66,7 +66,7 @@ function onModelCheckChange(model: string, checked: boolean) {
 
 <template>
   <div class="api-summary">
-    <template v-if="hasValidRuntime && currentProfile">
+    <template v-if="hasConfiguredApi && currentProfile">
       <el-dropdown trigger="click" @command="switchProfile">
         <span class="api-meta-chip api-meta-chip--api api-meta-chip--clickable">
           <span class="api-meta-label">API</span>

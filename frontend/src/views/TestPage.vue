@@ -42,7 +42,9 @@ const {
   registry,
   resolvedRequest,
   selectedModelNames,
+  hasValidRuntime,
   setSelectedModels,
+  resetToFirstModelSelection,
   syncWithRegistry,
   persistRuntime,
   resolveRequestWithModelFallback,
@@ -371,6 +373,32 @@ function applyRunMeta(run: RpHistoryRunMeta | null | undefined) {
   runtime.value.top_k = run.top_k
 }
 
+async function syncRpHistorySelection(key: string) {
+  if (!key) {
+    rpHistoryDetail.value = null
+    resetToFirstModelSelection()
+    return
+  }
+  const summary = selectedRpHistorySummary.value
+  if (!summary) return
+  try {
+    const detail = await getRpHistoryDetail({
+      user_id: summary.user_id,
+      role_id: summary.role_id,
+      app_name: summary.app_name,
+      run_group_id: summary.run_group_id,
+    })
+    rpHistoryDetail.value = detail
+    await applyRpHistoryContext(detail)
+    applyHistoryModelSelection(detail)
+    applyRunMeta(pickRunMetaForPromptType(detail, promptType.value))
+    await loadSystemPrompt()
+  } catch (error) {
+    rpHistoryDetail.value = null
+    ElMessage.error(error instanceof Error ? error.message : '加载 RP 历史失败')
+  }
+}
+
 function applyHistoryModelSelection(detail: RpHistoryDetail) {
   const historyModels = (detail.model_runs ?? [])
     .map((run) => run.model.trim())
@@ -575,31 +603,6 @@ async function runTest() {
   await executeRun({ mode: promptType.value })
 }
 
-async function syncRpHistorySelection(key: string) {
-  if (!key) {
-    rpHistoryDetail.value = null
-    return
-  }
-  const summary = selectedRpHistorySummary.value
-  if (!summary) return
-  try {
-    const detail = await getRpHistoryDetail({
-      user_id: summary.user_id,
-      role_id: summary.role_id,
-      app_name: summary.app_name,
-      run_group_id: summary.run_group_id,
-    })
-    rpHistoryDetail.value = detail
-    await applyRpHistoryContext(detail)
-    applyHistoryModelSelection(detail)
-    applyRunMeta(pickRunMetaForPromptType(detail, promptType.value))
-    await loadSystemPrompt()
-  } catch (error) {
-    rpHistoryDetail.value = null
-    ElMessage.error(error instanceof Error ? error.message : '加载 RP 历史失败')
-  }
-}
-
 async function loadRpHistoryOptions() {
   try {
     rpHistoryOptions.value = await listRpHistory()
@@ -630,6 +633,9 @@ onMounted(async () => {
     loadVersionOptions(),
     loadRpHistoryOptions(),
   ])
+  if (!selectedRpHistoryKey.value) {
+    resetToFirstModelSelection()
+  }
   await loadSystemPrompt()
 })
 
@@ -773,7 +779,14 @@ async function loadVersionOptions() {
                   />
                   <span class="hint">关闭时最终 SP 不含 NSFW 规则，占位符会被移除</span>
                 </div>
-                <el-button type="primary" :loading="running" @click="runTest">运行测试</el-button>
+                <el-button
+                  type="primary"
+                  :loading="running"
+                  :disabled="!hasValidRuntime"
+                  @click="runTest"
+                >
+                  运行测试
+                </el-button>
               </div>
             </el-form-item>
             </el-form>
