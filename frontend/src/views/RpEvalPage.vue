@@ -43,7 +43,6 @@ import {
 } from '../utils/parseRpEvalJson'
 import { DEEPSEEK_JSON_OUTPUT_EXTRA } from '../utils/apiProfileStorage'
 import {
-  computeAdaptiveChatTimeout,
   computeAdaptiveMaxCompletionTokens,
 } from '../utils/chatCompletionTimeout'
 import {
@@ -90,23 +89,15 @@ const selectedRpHistorySummary = computed(
 const modelRuns = computed(() => rpHistoryDetail.value?.model_runs ?? [])
 
 const modelTablePaneRef = ref<HTMLElement | null>(null)
-const modelTableMaxHeight = ref<number | undefined>(undefined)
 const modelTableCompact = ref(false)
 let modelTableResizeObserver: ResizeObserver | null = null
 
 function syncModelTableLayout() {
   const pane = modelTablePaneRef.value
   if (!pane || historyTab.value !== 'rp-test') {
-    modelTableMaxHeight.value = undefined
     return
   }
-
   modelTableCompact.value = pane.clientWidth < 360
-
-  // 该容器已被 flex 链约束为「可用高度」。直接作为 el-table 的 max-height：
-  // 行少时表格按内容自动收缩（不留白），行多时在表格内部出现滚动条。
-  const available = Math.floor(pane.clientHeight)
-  modelTableMaxHeight.value = available > 60 ? available : undefined
 }
 
 function bindModelTableResizeObserver() {
@@ -371,7 +362,6 @@ async function handleRunEval() {
   selectedEvalId.value = null
   selectedEvalDetail.value = null
 
-  const timeoutSeconds = computeAdaptiveChatTimeout(modelRuns.length)
   streamAbort = new AbortController()
 
   try {
@@ -400,7 +390,6 @@ async function handleRunEval() {
         extra_body: evalExtraBody,
         system_prompt: evalSystemPrompt.value,
         user_content: userContent,
-        timeout_seconds: timeoutSeconds,
         max_completion_tokens: computeAdaptiveMaxCompletionTokens(modelRuns.length),
       },
       {
@@ -468,7 +457,7 @@ async function handleRunEval() {
   } catch (error) {
     streaming.value = false
     if (error instanceof DOMException && error.name === 'AbortError') {
-      ElMessage.error(`测评超时（连续 ${timeoutSeconds}s 无数据），请重试或减少对比模型数`)
+      ElMessage.error('测评已取消')
     } else {
       ElMessage.error(error instanceof Error ? error.message : '测评失败')
     }
@@ -595,7 +584,6 @@ onUnmounted(() => {
                   :loading="detailLoading"
                   :checked-models="checkedEvalModels"
                   :compact="modelTableCompact"
-                  :max-height="modelTableMaxHeight"
                   @update:checked-models="checkedEvalModels = $event"
                   @deleted="onRpTestHistoryDeleted"
                 />
@@ -1054,35 +1042,8 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.rp-model-table-wrap {
-  flex: 0 1 auto;
-  min-height: 0;
-  max-height: 100%;
-  width: 100%;
-  overflow: hidden;
-}
-
 .rp-test-table {
   width: 100% !important;
-}
-
-.rp-test-table :deep(.el-table__body-wrapper) {
-  scrollbar-width: thin;
-  scrollbar-color: #b1b3b8 transparent;
-}
-
-.rp-test-table :deep(.el-table__body-wrapper::-webkit-scrollbar) {
-  width: 8px;
-  height: 8px;
-}
-
-.rp-test-table :deep(.el-table__body-wrapper::-webkit-scrollbar-thumb) {
-  background-color: #b1b3b8;
-  border-radius: 4px;
-}
-
-.rp-test-table :deep(.el-table__body-wrapper::-webkit-scrollbar-thumb:hover) {
-  background-color: #909399;
 }
 
 .rp-test-table :deep(.el-table__cell) {

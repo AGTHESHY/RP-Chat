@@ -1,5 +1,4 @@
 import { buildQuery } from './query'
-import { CHAT_TIMEOUT_BASE_SECONDS } from '../utils/chatCompletionTimeout'
 
 export type BaselineVersion = 'v1' | 'v2'
 export type PromptVersion = BaselineVersion | string
@@ -503,36 +502,6 @@ export async function streamChatCompletion(
   callbacks: ChatStreamCallbacks = {},
   signal?: AbortSignal,
 ): Promise<ChatStreamResult> {
-  const idleTimeoutSec = body.timeout_seconds ?? CHAT_TIMEOUT_BASE_SECONDS
-  const idleAbort = new AbortController()
-  let idleTimer: ReturnType<typeof setTimeout> | null = null
-  let finished = false
-
-  const stopIdleTimer = () => {
-    finished = true
-    if (idleTimer !== null) {
-      clearTimeout(idleTimer)
-      idleTimer = null
-    }
-  }
-
-  /** 有数据流动时重置；流式进行中不设总时长上限 */
-  const bumpIdleTimer = () => {
-    if (finished) return
-    if (idleTimer !== null) clearTimeout(idleTimer)
-    idleTimer = setTimeout(() => {
-      if (!finished) idleAbort.abort()
-    }, idleTimeoutSec * 1000)
-  }
-
-  const onExternalAbort = () => idleAbort.abort()
-  if (signal) {
-    if (signal.aborted) idleAbort.abort()
-    else signal.addEventListener('abort', onExternalAbort, { once: true })
-  }
-
-  bumpIdleTimer()
-
   let result: ChatStreamResult = {
     status: 200,
     raw_content: '',
@@ -545,7 +514,7 @@ export async function streamChatCompletion(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: idleAbort.signal,
+      signal,
     })
 
     result = {
@@ -556,7 +525,6 @@ export async function streamChatCompletion(
     }
 
     if (!resp.ok || !resp.body) {
-      stopIdleTimer()
       const text = await resp.text().catch(() => '')
       result.error = text || `Request failed: ${resp.status}`
       callbacks.onError?.(result.error)
@@ -573,12 +541,10 @@ export async function streamChatCompletion(
       try {
         evt = JSON.parse(dataStr)
       } catch {
-        bumpIdleTimer()
         return
       }
       const type = evt.type
       if (type === 'delta') {
-        bumpIdleTimer()
         const content = typeof evt.content === 'string' ? evt.content : ''
         const reasoning = typeof evt.reasoning === 'string' ? evt.reasoning : ''
         if (content) {
@@ -590,25 +556,20 @@ export async function streamChatCompletion(
           callbacks.onReasoning?.(reasoning, result.reasoning_content)
         }
       } else if (type === 'done') {
-        stopIdleTimer()
         result.finish_reason = (evt.finish_reason as string | null) ?? null
         if (evt.usage && typeof evt.usage === 'object') {
           result.usage = evt.usage as Record<string, number>
         }
       } else if (type === 'error') {
-        stopIdleTimer()
         result.status = typeof evt.status === 'number' ? evt.status : 500
         result.error = typeof evt.error === 'string' ? evt.error : '流式请求失败'
         callbacks.onError?.(result.error)
-      } else {
-        bumpIdleTimer()
       }
     }
 
     for (;;) {
       const { value, done } = await reader.read()
       if (done) break
-      bumpIdleTimer()
       buffer += decoder.decode(value, { stream: true })
       let sepIndex: number
       while ((sepIndex = buffer.indexOf('\n\n')) !== -1) {
@@ -622,7 +583,6 @@ export async function streamChatCompletion(
         }
       }
     }
-    stopIdleTimer()
     const tail = buffer.trim()
     if (tail.startsWith('data:')) {
       handleEvent(tail.slice('data:'.length).trim())
@@ -631,17 +591,10 @@ export async function streamChatCompletion(
     callbacks.onDone?.(result)
     return result
   } catch (error) {
-    stopIdleTimer()
     if (error instanceof DOMException && error.name === 'AbortError') {
-      if (signal?.aborted) throw error
-      result.status = 504
-      result.error = `连续 ${idleTimeoutSec}s 无数据，连接已断开`
-      callbacks.onError?.(result.error)
-      return result
+      throw error
     }
     throw error
-  } finally {
-    if (signal) signal.removeEventListener('abort', onExternalAbort)
   }
 }
 

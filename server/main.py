@@ -212,16 +212,9 @@ class ChatCompletionRequest(BaseModel):
     extra_body: Optional[dict[str, Any]] = None
 
 
-def _resolve_chat_timeout(timeout_seconds: Optional[float]) -> float:
-    """流式空闲超时：连续无数据的最长等待秒数（非总时长）。"""
-    if timeout_seconds is None:
-        return 120.0
-    return max(30.0, min(600.0, float(timeout_seconds)))
-
-
-def _stream_httpx_timeout(idle_seconds: float) -> httpx.Timeout:
-    """流式上游：read 为 chunk 间空闲超时，不设总时长上限。"""
-    return httpx.Timeout(connect=30.0, read=idle_seconds, write=60.0, pool=30.0)
+def _stream_httpx_timeout() -> "httpx.Timeout":
+    """流式上游：不设 read 空闲超时，仅在连接/写入阶段限时。"""
+    return httpx.Timeout(connect=30.0, read=None, write=60.0, pool=30.0)
 
 
 def _resolve_max_completion_tokens(max_completion_tokens: Optional[int]) -> int:
@@ -787,7 +780,6 @@ async def _iter_chat_stream(
     payload: dict[str, Any],
     headers: dict[str, str],
     httpx_timeout: "httpx.Timeout",
-    request_timeout: float,
 ):
     """向前端透传归一化 SSE：delta / done / error。"""
     try:
@@ -836,8 +828,7 @@ async def _iter_chat_stream(
                     if delta["finish_reason"]:
                         finish_reason = delta["finish_reason"]
                     if delta["content"] or delta["reasoning"]:
-                        if delta["content"]:
-                            got_content = True
+                        got_content = True
                         yield _sse_event(
                             {
                                 "type": "delta",
@@ -862,7 +853,7 @@ async def _iter_chat_stream(
             {
                 "type": "error",
                 "status": 504,
-                "error": f"Upstream idle timed out after {int(request_timeout)}s without data: {exc}",
+                "error": f"Upstream request timed out: {exc}",
             }
         )
     except httpx.RequestError as exc:
@@ -877,10 +868,9 @@ async def chat_completions_stream(body: ChatCompletionRequest) -> StreamingRespo
         "Content-Type": "application/json",
         "Authorization": f"Bearer {body.api_key}",
     }
-    request_timeout = _resolve_chat_timeout(body.timeout_seconds)
-    httpx_timeout = _stream_httpx_timeout(request_timeout)
+    httpx_timeout = _stream_httpx_timeout()
     return StreamingResponse(
-        _iter_chat_stream(base_url, payload, headers, httpx_timeout, request_timeout),
+        _iter_chat_stream(base_url, payload, headers, httpx_timeout),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -995,14 +985,13 @@ async def chat_completions(body: ChatCompletionRequest) -> dict[str, Any]:
         "Authorization": f"Bearer {body.api_key}",
     }
 
-    request_timeout = _resolve_chat_timeout(body.timeout_seconds)
-    httpx_timeout = _stream_httpx_timeout(request_timeout)
+    httpx_timeout = _stream_httpx_timeout()
     try:
         return await _stream_chat_completion(base_url, payload, headers, httpx_timeout)
     except httpx.TimeoutException as exc:
         raise HTTPException(
             status_code=504,
-            detail=f"Upstream idle timed out after {int(request_timeout)}s without data: {exc}",
+            detail=f"Upstream request timed out: {exc}",
         ) from exc
     except httpx.RequestError as exc:
         raise HTTPException(status_code=502, detail=f"Request failed: {exc}") from exc

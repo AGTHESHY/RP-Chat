@@ -36,9 +36,8 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:8000',
         changeOrigin: true,
-        // 多模型测评最长等待 600s，代理需与之对齐
-        timeout: 600_000,
-        proxyTimeout: 600_000,
+        timeout: 0,
+        proxyTimeout: 0,
       },
     },
   },

@@ -10,7 +10,6 @@ const props = defineProps<{
   loading?: boolean
   checkedModels: string[]
   compact?: boolean
-  maxHeight?: number
 }>()
 
 const emit = defineEmits<{
@@ -94,7 +93,6 @@ async function removeCheckedRecords() {
       <el-table
         v-loading="loading"
         :data="modelRuns"
-        :max-height="maxHeight"
         class="eval-table rp-test-table"
         size="small"
         empty-text="暂无测试记录，请先在 RP 测试页运行"
@@ -157,7 +155,16 @@ async function removeCheckedRecords() {
 </template>
 
 <style scoped>
+.rp-test-history-table {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
 .tab-pane-toolbar {
+  flex-shrink: 0;
   border-top: none;
   min-height: 36px;
 }
@@ -170,6 +177,23 @@ async function removeCheckedRecords() {
 .rp-model-table-wrap {
   flex: 1;
   min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: #b1b3b8 transparent;
+}
+
+.rp-model-table-wrap::-webkit-scrollbar {
+  width: 8px;
+}
+
+.rp-model-table-wrap::-webkit-scrollbar-thumb {
+  background-color: #b1b3b8;
+  border-radius: 4px;
+}
+
+.rp-model-table-wrap::-webkit-scrollbar-thumb:hover {
+  background-color: #909399;
 }
 
 .rp-test-table :deep(.rp-test-row--selected > td) {

@@ -13,7 +13,6 @@ import {
 import { DEEPSEEK_JSON_OUTPUT_EXTRA } from '../utils/apiProfileStorage'
 import { buildBrainUserPayload } from '../utils/brainPayload'
 import {
-  computeAdaptiveChatTimeout,
   computeAdaptiveMaxCompletionTokens,
 } from '../utils/chatCompletionTimeout'
 import { parseBrainJson, type BrainParsed } from '../utils/parseBrainJson'
@@ -279,7 +278,6 @@ export async function runBrainStream(params: BrainStreamRunParams): Promise<void
     1,
     evalDetail.evaluated_models?.length ?? (evalMode === 'multi_compare' ? 2 : 1),
   )
-  const timeoutSeconds = computeAdaptiveChatTimeout(evaluatedModelCount)
 
   let sessionId: string
   try {
@@ -339,7 +337,6 @@ export async function runBrainStream(params: BrainStreamRunParams): Promise<void
         extra_body: extra,
         system_prompt: brainSystemPrompt,
         user_content: userContent,
-        timeout_seconds: timeoutSeconds,
         max_completion_tokens: computeAdaptiveMaxCompletionTokens(evaluatedModelCount),
       },
       {
@@ -450,7 +447,7 @@ export async function runBrainStream(params: BrainStreamRunParams): Promise<void
   } catch (error) {
     if (token !== runToken) return
     if (error instanceof DOMException && error.name === 'AbortError') {
-      const message = `智脑分析超时（连续 ${timeoutSeconds}s 无数据），请重试`
+      const message = '智脑分析已取消'
       await patchStreamSession(sessionId, {
         status: 'cancelled',
         raw_content: snapshot.raw,
