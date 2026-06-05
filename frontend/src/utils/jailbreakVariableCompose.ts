@@ -1,5 +1,7 @@
 export type JailbreakVariableGroup = 'nsfw' | 'general' | 'custom'
 
+import { randomUUID } from './randomId'
+
 export interface JailbreakVariableModule {
   id: string
   key: string
@@ -36,7 +38,7 @@ const ST_TAG_RE = /\{\{[^}]+\}\}/g
 const TAG_REF_BODY_RE = /^<([^>]+)>$/
 
 function newId(): string {
-  return crypto.randomUUID()
+  return randomUUID()
 }
 
 export function isNsfwKey(key: string, label = ''): boolean {

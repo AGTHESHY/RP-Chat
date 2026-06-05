@@ -1,4 +1,5 @@
 import { decryptSecret, encryptSecret, isEncryptedSecret } from './secretStorage'
+import { randomUUID } from './randomId'
 import {
   API_CONFIG_STORAGE_KEY,
   defaultApiConfig,
@@ -95,7 +96,7 @@ export const defaultRuntimeConfig: PageRuntimeConfig = {
 }
 
 function createProfileId(): string {
-  return crypto.randomUUID()
+  return randomUUID()
 }
 
 export function createDefaultProfile(overrides?: Partial<ApiProfile>): ApiProfile {
