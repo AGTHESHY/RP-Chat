@@ -217,12 +217,17 @@ const validationTitle = computed(() => {
 }
 
 .json-scroll-host {
-  flex: 1;
+  flex: 1 1 0;
   min-height: 0;
+  overflow: hidden;
 }
 
 .json-scroll-host :deep(.el-scrollbar) {
   height: 100%;
+}
+
+.json-scroll-host :deep(.el-scrollbar__wrap) {
+  overflow-x: hidden;
 }
 
 .checks {

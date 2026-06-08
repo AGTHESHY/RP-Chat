@@ -928,11 +928,12 @@ async function loadVersionOptions() {
                       total: {{ step.response.usage.total_tokens ?? 'N/A' }}
                     </span>
                   </div>
-                  <ResultPanel
-                    v-if="step.rawContent"
-                    :content="step.rawContent"
-                    :prompt-type="step.promptType"
-                  />
+                  <div v-if="step.rawContent" class="run-result-panel-host run-result-panel-host--flow">
+                    <ResultPanel
+                      :content="step.rawContent"
+                      :prompt-type="step.promptType"
+                    />
+                  </div>
                   <el-divider v-if="stepIndex < bundle.steps.length - 1" />
                 </div>
               </template>
@@ -945,11 +946,12 @@ async function loadVersionOptions() {
                     total: {{ bundle.steps[0].response.usage.total_tokens ?? 'N/A' }}
                   </span>
                 </div>
-                <ResultPanel
-                  v-if="bundle.steps[0].rawContent"
-                  :content="bundle.steps[0].rawContent"
-                  :prompt-type="bundle.steps[0].promptType"
-                />
+                <div v-if="bundle.steps[0].rawContent" class="run-result-panel-host">
+                  <ResultPanel
+                    :content="bundle.steps[0].rawContent"
+                    :prompt-type="bundle.steps[0].promptType"
+                  />
+                </div>
               </template>
               <el-divider v-if="bundleIndex < modelRunBundles.length - 1" />
             </div>
@@ -969,7 +971,9 @@ async function loadVersionOptions() {
                   total: {{ step.response.usage.total_tokens ?? 'N/A' }}
                 </span>
               </div>
-              <ResultPanel v-if="step.rawContent" :content="step.rawContent" :prompt-type="step.promptType" />
+              <div v-if="step.rawContent" class="run-result-panel-host run-result-panel-host--flow">
+                <ResultPanel :content="step.rawContent" :prompt-type="step.promptType" />
+              </div>
               <el-divider v-if="index < stepResults.length - 1" />
             </div>
           </template>
@@ -1333,7 +1337,7 @@ async function loadVersionOptions() {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow-y: auto;
 }
 
 .run-result-panel-host {
@@ -1343,9 +1347,20 @@ async function loadVersionOptions() {
   flex-direction: column;
 }
 
+.run-result-panel-host--flow {
+  flex: none;
+  min-height: auto;
+}
+
 .run-result-panel-host :deep(.result-panel) {
   flex: 1;
   min-height: 0;
+}
+
+.run-result-panel-host--flow :deep(.result-panel) {
+  flex: none;
+  min-height: 0;
+  height: auto;
 }
 
 .reasoning-tag {
