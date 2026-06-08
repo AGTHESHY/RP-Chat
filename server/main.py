@@ -38,6 +38,18 @@ from stream_session_service import (
     get_stream_session,
     patch_stream_session,
 )
+from rp_test_job_service import (
+    cancel_rp_test_job,
+    create_rp_test_job,
+    delete_rp_test_job,
+    get_active_rp_test_job,
+    get_rp_test_job,
+)
+from rp_test_job_runner import (
+    build_job_plan,
+    resume_running_rp_test_jobs,
+    schedule_rp_test_job,
+)
 from rp_eval_service import (
     RpEvalSaveRequest,
     create_rp_eval,
@@ -124,6 +136,7 @@ async def lifespan(app: FastAPI):
 
     loop = asyncio.get_running_loop()
     bootstrap_future = loop.run_in_executor(None, _run_seed_bootstrap)
+    await resume_running_rp_test_jobs()
 
     yield
 
@@ -749,6 +762,104 @@ def api_get_active_stream_session(
     if not data:
         raise HTTPException(status_code=404, detail="active stream session not found")
     return data
+
+
+class RpTestJobModelConfig(BaseModel):
+    base_url: str
+    api_key: str
+    model: str
+    temperature: float = 0.3
+    top_k: Optional[int] = None
+    extra_body: Optional[dict[str, Any]] = None
+
+
+class RpTestJobConversation(BaseModel):
+    conversation_key: str
+    user_id: str
+    role_id: str
+    app_name: str = ""
+    role_name: str = ""
+
+
+class RpTestJobCreateRequest(BaseModel):
+    test_mode: str = Field(pattern="^(pipeline|single)$")
+    prompt_type: str = Field(pattern="^(segment_compress|history_merge)$")
+    conversation: RpTestJobConversation
+    models: list[str] = Field(min_length=1)
+    model_configs: dict[str, RpTestJobModelConfig]
+    version: str
+    lang: str = "en"
+    round_range: Optional[dict[str, int]] = None
+    segment_index: Optional[int] = Field(default=None, ge=1)
+    merge_segment_count: Optional[int] = Field(default=None, ge=1, le=4)
+    merge_segment_end_index: Optional[int] = Field(default=None, ge=1)
+    rp_history_run_id: Optional[int] = Field(default=None, ge=1)
+
+
+@app.post("/api/rp-test-jobs")
+async def api_create_rp_test_job(body: RpTestJobCreateRequest) -> dict[str, Any]:
+    if body.test_mode == "pipeline" and not body.round_range:
+        raise HTTPException(status_code=400, detail="round_range is required for pipeline mode")
+    if body.test_mode == "single" and body.prompt_type == "segment_compress" and not body.segment_index:
+        raise HTTPException(status_code=400, detail="segment_index is required for single compress")
+
+    for model in body.models:
+        if model not in body.model_configs:
+            raise HTTPException(status_code=400, detail=f"model_configs missing entry for {model}")
+
+    plan, has_forced_tail = build_job_plan(body.model_dump())
+    payload: dict[str, Any] = {
+        "conversation_key": body.conversation.conversation_key,
+        "conversation": body.conversation.model_dump(),
+        "test_mode": body.test_mode,
+        "prompt_type": body.prompt_type,
+        "models": body.models,
+        "model_configs": {
+            model: cfg.model_dump() for model, cfg in body.model_configs.items()
+        },
+        "version": body.version,
+        "lang": body.lang,
+        "round_range": body.round_range,
+        "segment_index": body.segment_index,
+        "merge_segment_count": body.merge_segment_count,
+        "merge_segment_end_index": body.merge_segment_end_index,
+        "rp_history_run_id": body.rp_history_run_id,
+        "plan": plan,
+        "has_forced_tail_merge": has_forced_tail,
+    }
+    job = create_rp_test_job(payload)
+    schedule_rp_test_job(job["id"])
+    return job
+
+
+@app.get("/api/rp-test-jobs/active")
+def api_get_active_rp_test_job(
+    conversation_key: str = Query(..., min_length=1),
+) -> dict[str, Any]:
+    job = get_active_rp_test_job(conversation_key)
+    if not job:
+        raise HTTPException(status_code=404, detail="active RP test job not found")
+    return job
+
+
+@app.get("/api/rp-test-jobs/{job_id}")
+def api_get_rp_test_job(job_id: str) -> dict[str, Any]:
+    job = get_rp_test_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="RP test job not found")
+    return job
+
+
+@app.delete("/api/rp-test-jobs/{job_id}")
+def api_delete_rp_test_job(job_id: str) -> dict[str, Any]:
+    job = get_rp_test_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="RP test job not found")
+    if job.get("status") == "running":
+        cancel_rp_test_job(job_id)
+        return {"ok": True, "cancelled": True}
+    delete_rp_test_job(job_id)
+    return {"ok": True, "cancelled": False}
 
 
 def _build_chat_payload(body: ChatCompletionRequest) -> dict[str, Any]:

@@ -24,3 +24,8 @@ REDIS_BRAIN_TTL_SECONDS = int(os.getenv("REDIS_BRAIN_TTL_SECONDS", str(3 * 24 * 
 REDIS_STREAM_TTL_SECONDS = int(os.getenv("REDIS_STREAM_TTL_SECONDS", str(3600)))
 STREAM_KEY_PREFIX = "rpchat:stream:"
 STREAM_ACTIVE_PREFIX = "rpchat:stream:active:"
+# RP 测试异步任务暂存默认 1 小时；设为 0 则永不过期
+REDIS_RP_TEST_JOB_TTL_SECONDS = int(os.getenv("REDIS_RP_TEST_JOB_TTL_SECONDS", str(3600)))
+RP_TEST_JOB_PREFIX = "rpchat:rp_test:job:"
+RP_TEST_ACTIVE_PREFIX = "rpchat:rp_test:active:"
+RP_TEST_RUNNING_SET = "rpchat:rp_test:running"

@@ -1,20 +1,15 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
-  composePrompt,
-  getChatQaConversation,
   getRpHistoryDetail,
-  getVersionPrompt,
   listChatQaConversations,
   listRpCompressResults,
   listRpMergeResults,
   listRpHistory,
   listVersions,
-  runChatCompletion,
-  saveRpCompressResult,
-  saveRpMergeResult,
   type ChatCompletionResponse,
+  type RpTestJobCreateBody,
   type ChatQaConversationSummary,
   type PromptLang,
   type PromptType,
@@ -28,17 +23,12 @@ import { formatHistoryTime } from '../utils/format'
 import ApiRuntimePicker from '../components/ApiRuntimePicker.vue'
 import ResultPanel from '../components/ResultPanel.vue'
 import { usePageRuntime } from '../composables/usePageRuntime'
-import type { ResolvedRuntimeRequest } from '../utils/apiProfileStorage'
 import {
-  buildHistoryMergePayload,
-  buildSegmentCompressPayload,
   getSegmentRoundRange,
   maxNextSegmentIndex,
   mergeableSegmentsFromRecords,
-  parseModelJson,
   pickConsecutiveSegments,
   promptTypeLabel,
-  validateRoundRange,
   type MergeableSegment,
   type SelectedConversation,
 } from '../utils/conversationPayload'
@@ -46,10 +36,15 @@ import {
   formatPipelineCycleLines,
   planMemoryPipeline,
   pipelinePlanSummary,
-  pipelineStepLabel,
-  type HistorySegmentItem,
   type PipelinePlan,
 } from '../utils/memoryPipeline'
+import {
+  attachRpTestJobRunner,
+  recoverRpTestJob,
+  startRpTestJob,
+  subscribeRpTestJob,
+  type RpTestJobSnapshot,
+} from '../services/rpTestJobRunner'
 
 const testRuntime = usePageRuntime('test')
 const {
@@ -107,6 +102,29 @@ interface ModelRunBundle {
 const stepResults = ref<TestStepResult[]>([])
 const modelRunBundles = ref<ModelRunBundle[]>([])
 const pipelineForcedTailWarning = ref(false)
+const jobSnapshot = ref<RpTestJobSnapshot | null>(null)
+
+const jobProgressHint = computed(() => {
+  const snap = jobSnapshot.value
+  if (!snap || snap.phase !== 'running') return ''
+  if (snap.progressTotal > 0) {
+    return `测试中 ${snap.progressStep}/${snap.progressTotal} 步 · 可切换页面`
+  }
+  return '测试中 · 可切换页面'
+})
+
+function applyJobSnapshot(snap: RpTestJobSnapshot) {
+  jobSnapshot.value = snap
+  running.value = snap.phase === 'running'
+  modelRunBundles.value = snap.modelBundles
+  stepResults.value = snap.stepResults
+  lastResponse.value = snap.lastResponse
+  rawContent.value = snap.rawContent
+  reasoningContent.value = snap.reasoningContent
+  if (snap.phase === 'running' || snap.phase === 'done') {
+    pipelineForcedTailWarning.value = snap.pipelineForcedTailWarning
+  }
+}
 
 const rpHistoryOptions = ref<RpHistorySummary[]>([])
 const selectedRpHistoryKey = ref('')
@@ -291,7 +309,8 @@ const savedPreviewPanel = computed((): SavedPreviewPanel | null => {
 
 const hasRunResult = computed(
   () =>
-    Boolean(lastResponse.value)
+    running.value
+    || Boolean(lastResponse.value)
     || stepResults.value.length > 0
     || modelRunBundles.value.length > 0,
 )
@@ -377,6 +396,7 @@ watch(selectedConversationKey, (key) => {
   if (row) {
     applyConversation(row)
   }
+  void recoverRpTestJob(key)
 })
 
 async function refreshSavedRecords() {
@@ -434,708 +454,10 @@ function clampMergeSegmentSelection() {
   )
 }
 
-async function buildUserPayload(
-  type: PromptType,
-  options?: {
-    compressExpected?: Record<string, unknown>
-    model?: string
-  },
-): Promise<Record<string, unknown>> {
-  const conv = selectedConversation.value
-  if (!conv) {
-    throw new Error('请先选择测试用例')
-  }
-
-  const detail = await getChatQaConversation({
-    user_id: conv.user_id,
-    role_id: conv.role_id,
-    app_name: conv.app_name,
-  })
-  if (type === 'segment_compress') {
-    const range = getSegmentRoundRange(selectedSegmentIndex.value, detail.messages.length)
-    validateRoundRange(range.start, range.end, detail.messages.length)
-    let oldMemoryState: Record<string, unknown> = {}
-    const prevIndex = selectedSegmentIndex.value - 1
-    if (prevIndex >= 1) {
-      const prev = loadedCompressSegments.value.find((row) => row.segment_index === prevIndex)
-      if (prev) {
-        oldMemoryState = (prev.expected_result.memory_state as Record<string, unknown>) ?? {}
-      }
-    }
-    return buildSegmentCompressPayload(
-      detail.messages,
-      conv,
-      range.start,
-      range.end,
-      oldMemoryState,
-    )
-  }
-
-  const model = options?.model ?? selectedModelNames.value[0]
-  if (!model) {
-    throw new Error('请至少选择一个模型')
-  }
-
-  await refreshSavedRecords()
-  const available = mergeableSegmentsFromRecords(loadedCompressSegments.value)
-  const segments = pickConsecutiveSegments(
-    available,
-    mergeSegmentCount.value,
-    mergeSegmentEndIndex.value,
-  )
-
-  let oldHistoryMemory = ''
-  try {
-    const savedMerges = await listRpMergeResults({
-      user_id: conv.user_id,
-      role_id: conv.role_id,
-      app_name: conv.app_name,
-      prompt_version: version.value,
-      model,
-      run_group_id: rpHistoryDetail.value?.run_group_id,
-    })
-    const latest = savedMerges[savedMerges.length - 1]
-    oldHistoryMemory = String(latest?.expected_result.history_memory ?? '')
-  } catch {
-    oldHistoryMemory = ''
-  }
-
-  return buildHistoryMergePayload(segments, oldHistoryMemory)
-}
-
 function buildMergeSegmentWindow(): { start: number; end: number } {
   return {
     start: mergeSegmentEndIndex.value - mergeSegmentCount.value + 1,
     end: mergeSegmentEndIndex.value,
-  }
-}
-
-async function loadPromptParts(type: PromptType) {
-  const data = await getVersionPrompt(version.value, type, lang.value)
-  return {
-    sfw: data.content_sfw,
-    nsfw: data.content_nsfw,
-    system: composePrompt(data.content_sfw, data.content_nsfw, false),
-  }
-}
-
-async function executeTestStep(
-  type: PromptType,
-  userPayload: Record<string, unknown>,
-  systemPromptText: string,
-  requestConfig: ResolvedRuntimeRequest,
-): Promise<TestStepResult> {
-  if (!systemPromptText.trim()) {
-    throw new Error(`${promptTypeLabel(type)} 的 System Prompt 未加载`)
-  }
-
-  const resp = await runChatCompletion({
-    base_url: requestConfig.base_url,
-    api_key: requestConfig.api_key,
-    model: requestConfig.model,
-    temperature: requestConfig.temperature,
-    top_k: requestConfig.top_k ?? null,
-    extra_body: requestConfig.extra_body,
-    system_prompt: systemPromptText,
-    user_content: JSON.stringify(userPayload, null, 2),
-  })
-
-  const stepRaw = resp.raw_content || resp.error || resp.raw_text || ''
-  return {
-    promptType: type,
-    response: resp,
-    rawContent: stepRaw,
-    reasoningContent: resp.reasoning_content || '',
-  }
-}
-
-function initialBatchRunGroupId(): number | undefined {
-  if (!selectedRpHistoryKey.value || !rpHistoryDetail.value) {
-    return undefined
-  }
-  return rpHistoryDetail.value.run_group_id
-}
-
-async function saveCompressStep(
-  parsed: Record<string, unknown>,
-  requestConfig: ResolvedRuntimeRequest,
-  runGroupId?: number,
-  segmentIndex?: number,
-) {
-  const conv = selectedConversation.value
-  if (!conv) return null
-  return saveRpCompressResult({
-    user_id: conv.user_id,
-    role_id: conv.role_id,
-    app_name: conv.app_name,
-    role_name: conv.role_name,
-    prompt_version: version.value,
-    segment_index: segmentIndex ?? selectedSegmentIndex.value,
-    expected_result: parsed,
-    model: requestConfig.model,
-    top_k: requestConfig.top_k ?? null,
-    temperature: requestConfig.temperature,
-    ...(runGroupId != null ? { run_id: runGroupId } : {}),
-  })
-}
-
-async function saveMergeStep(
-  parsed: Record<string, unknown>,
-  requestConfig: ResolvedRuntimeRequest,
-  mergeSegmentStart: number,
-  mergeSegmentEnd: number,
-  runGroupId?: number,
-) {
-  const conv = selectedConversation.value
-  if (!conv) return null
-  return saveRpMergeResult({
-    user_id: conv.user_id,
-    role_id: conv.role_id,
-    app_name: conv.app_name,
-    role_name: conv.role_name,
-    prompt_version: version.value,
-    merge_segment_start: mergeSegmentStart,
-    merge_segment_end: mergeSegmentEnd,
-    expected_result: parsed,
-    model: requestConfig.model,
-    top_k: requestConfig.top_k ?? null,
-    temperature: requestConfig.temperature,
-    ...(runGroupId != null ? { run_id: runGroupId } : {}),
-  })
-}
-
-function applyStepToDisplay(step: TestStepResult) {
-  lastResponse.value = step.response
-  rawContent.value = step.rawContent
-  reasoningContent.value = step.reasoningContent
-}
-
-function rpHistoryOptionLabel(row: RpHistorySummary): string {
-  const flags = [
-    row.has_compress ? 'C' : '',
-    row.has_merge ? 'M' : '',
-  ]
-    .filter(Boolean)
-    .join('')
-  const time = row.latest_updated_at ? formatHistoryTime(row.latest_updated_at) : ''
-  return [
-    row.role_name,
-    `${row.round_start}-${row.round_end}轮`,
-    row.prompt_version ? `SP:${row.prompt_version}` : null,
-    flags || null,
-    row.model_count > 0 ? `${row.model_count}模型` : null,
-    time || null,
-  ]
-    .filter(Boolean)
-    .join(' · ')
-}
-
-function pickRunMetaForPromptType(
-  detail: RpHistoryDetail,
-  type: PromptType,
-): RpHistoryRunMeta | null | undefined {
-  const runs = detail.model_runs ?? []
-  for (const run of runs) {
-    if (type === 'history_merge' && run.merge_run) return run.merge_run
-    if (type === 'segment_compress' && run.compress_run) return run.compress_run
-  }
-  return runs[0]?.compress_run ?? runs[0]?.merge_run
-}
-
-function applyRunMeta(run: RpHistoryRunMeta | null | undefined) {
-  if (!run) return
-  if (run.prompt_version && versionOptions.value.includes(run.prompt_version)) {
-    version.value = run.prompt_version
-  }
-  runtime.value.temperature = run.temperature
-  runtime.value.top_k = run.top_k
-}
-
-async function syncRpHistorySelection(key: string) {
-  if (!key) {
-    rpHistoryDetail.value = null
-    resetToFirstModelSelection()
-    return
-  }
-  const summary = selectedRpHistorySummary.value
-  if (!summary) return
-  try {
-    const detail = await getRpHistoryDetail({
-      user_id: summary.user_id,
-      role_id: summary.role_id,
-      app_name: summary.app_name,
-      run_group_id: summary.run_group_id,
-    })
-    rpHistoryDetail.value = detail
-    await applyRpHistoryContext(detail)
-    applyHistoryModelSelection(detail)
-    applyRunMeta(pickRunMetaForPromptType(detail, promptType.value))
-    await refreshSavedRecords()
-  } catch (error) {
-    rpHistoryDetail.value = null
-    ElMessage.error(error instanceof Error ? error.message : '加载 RP 历史失败')
-  }
-}
-
-function mergeSegmentOptionLabel(segment: MergeableSegment): string {
-  return `段 ${segment.index} · 第 ${segment.start_round}-${segment.end_round} 轮`
-}
-
-function applyHistoryModelSelection(detail: RpHistoryDetail) {
-  const historyModels = (detail.model_runs ?? [])
-    .map((run) => run.model.trim())
-    .filter(Boolean)
-
-  if (historyModels.length === 0) return
-
-  let bestProfileId = runtime.value.apiProfileId
-  let bestValid: string[] = []
-  for (const profile of registry.value.profiles) {
-    const valid = historyModels.filter((model) => profile.models.includes(model))
-    if (valid.length > bestValid.length) {
-      bestValid = valid
-      bestProfileId = profile.id
-    }
-  }
-
-  if (bestValid.length === 0) {
-    ElMessage.warning('该历史记录中的模型在当前 API 配置中均不可用')
-    return
-  }
-
-  runtime.value.apiProfileId = bestProfileId
-  setSelectedModels(bestValid)
-}
-
-async function applyRpHistoryContext(detail: RpHistoryDetail) {
-  const matched = conversationOptions.value.find(
-    (item) => item.conversation_key === detail.conversation_key,
-  )
-  if (matched) {
-    applyConversation(matched)
-  } else {
-    selectedConversationKey.value = detail.conversation_key
-    selectedConversation.value = {
-      conversation_key: detail.conversation_key,
-      user_id: detail.user_id,
-      role_id: detail.role_id,
-      app_name: detail.app_name,
-      role_name: detail.role_name,
-    }
-  }
-  roundRange.value = {
-    start: detail.round_start,
-    end: detail.round_end,
-  }
-}
-
-interface ExecuteRunOptions {
-  mode: PromptType
-}
-
-async function executeRun(options: ExecuteRunOptions) {
-  const mode = options.mode
-
-  if (!selectedConversation.value) {
-    ElMessage.error('请先选择测试用例')
-    return
-  }
-
-  const models = selectedModelNames.value
-  if (models.length === 0) {
-    ElMessage.error('请至少选择一个模型')
-    return
-  }
-
-  running.value = true
-  lastResponse.value = null
-  rawContent.value = ''
-  reasoningContent.value = ''
-  reasoningExpanded.value = []
-  stepResults.value = []
-  modelRunBundles.value = []
-
-  try {
-    const type = mode
-
-    const promptParts = await loadPromptParts(type)
-    const systemText = promptParts.system
-    if (!systemText.trim()) {
-      ElMessage.error('System Prompt 未加载')
-      return
-    }
-
-    const settled = await Promise.allSettled(
-      models.map(async (model) => {
-        let parsed: Record<string, unknown>
-        try {
-          parsed = await buildUserPayload(type, { model })
-        } catch (error) {
-          throw error instanceof Error ? error : new Error('构建测试输入失败')
-        }
-        const requestConfig = resolveRequestWithModelFallback(model)
-        if (!requestConfig) {
-          throw new Error(`模型 ${model} 配置无效`)
-        }
-        const step = await executeTestStep(type, parsed, systemText, requestConfig)
-        const mergeWindow =
-          type === 'history_merge' ? buildMergeSegmentWindow() : undefined
-        return { model, step, requestConfig, mergeWindow }
-      }),
-    )
-
-    const bundles: ModelRunBundle[] = []
-    let successCount = 0
-    let savedCount = 0
-    let batchRunGroupId = initialBatchRunGroupId()
-
-    for (let i = 0; i < settled.length; i++) {
-      const outcome = settled[i]
-      const model = models[i]
-      if (outcome.status === 'rejected') {
-        bundles.push({
-          model,
-          steps: [],
-          error: outcome.reason instanceof Error ? outcome.reason.message : '请求失败',
-        })
-        continue
-      }
-      const { step, requestConfig, mergeWindow } = outcome.value
-      bundles.push({ model, steps: [step] })
-      if (step.response.status !== 200) continue
-      successCount += 1
-      const parsedResult = parseModelJson(step.rawContent)
-      if (!parsedResult) continue
-      try {
-        const saved =
-          type === 'segment_compress'
-            ? await saveCompressStep(parsedResult, requestConfig, batchRunGroupId)
-            : await saveMergeStep(
-                parsedResult,
-                requestConfig,
-                mergeWindow!.start,
-                mergeWindow!.end,
-                batchRunGroupId,
-              )
-        if (saved?.run_group_id != null && batchRunGroupId == null) {
-          batchRunGroupId = saved.run_group_id
-        }
-        savedCount += 1
-      } catch {
-        /* 单条保存失败，继续其余模型 */
-      }
-    }
-
-    modelRunBundles.value = bundles
-    const firstOk = bundles.find((b) => b.steps.length > 0)
-    if (firstOk?.steps[0]) {
-      stepResults.value = firstOk.steps
-      applyStepToDisplay(firstOk.steps[0])
-    }
-
-    if (models.length === 1) {
-      const b = bundles[0]
-      if (b?.error) {
-        ElMessage.error(b.error)
-      } else if (b?.steps[0]?.response.status === 200) {
-        ElMessage.success(savedCount > 0 ? '请求成功，已保存历史 RP 效果' : '请求成功')
-      } else if (b?.steps[0]) {
-        ElMessage.error(`请求失败: HTTP ${b.steps[0].response.status}`)
-      }
-    } else {
-      ElMessage.info(
-        `并行完成 ${models.length} 个模型：成功 ${successCount}，已保存 ${savedCount}`,
-      )
-    }
-
-    if (savedCount > 0) {
-      await loadRpHistoryOptions()
-      if (selectedRpHistoryKey.value) {
-        await syncRpHistorySelection(selectedRpHistoryKey.value)
-      }
-    }
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '请求异常')
-  } finally {
-    running.value = false
-  }
-}
-
-function segmentRangeKey(start: number, end: number): string {
-  return `${start}-${end}`
-}
-
-interface PipelineCompressSaveItem {
-  segmentIndex: number
-  parsed: Record<string, unknown>
-}
-
-interface PipelineMergeSaveItem {
-  mergeSegmentStart: number
-  mergeSegmentEnd: number
-  parsed: Record<string, unknown>
-}
-
-interface PipelineModelOutcome {
-  model: string
-  steps: TestStepResult[]
-  requestConfig: ResolvedRuntimeRequest
-  compressSaves: PipelineCompressSaveItem[]
-  mergeSaves: PipelineMergeSaveItem[]
-}
-
-async function runPipelineForModel(
-  model: string,
-  plan: PipelinePlan,
-  messages: Awaited<ReturnType<typeof getChatQaConversation>>['messages'],
-  conv: SelectedConversation,
-  compressSystem: string,
-  mergeSystem: string,
-): Promise<PipelineModelOutcome> {
-  const requestConfig = resolveRequestWithModelFallback(model)
-  if (!requestConfig) {
-    throw new Error(`模型 ${model} 配置无效`)
-  }
-
-  const segmentOutputs = new Map<string, HistorySegmentItem>()
-  const compressSaves: PipelineCompressSaveItem[] = []
-  const mergeSaves: PipelineMergeSaveItem[] = []
-  let memoryState: Record<string, unknown> = {}
-  let historyMemory = ''
-  const steps: TestStepResult[] = []
-
-  for (const pipelineStep of plan.steps) {
-    if (pipelineStep.type === 'compress') {
-      const { start, end } = pipelineStep.segment
-      const payload = buildSegmentCompressPayload(
-        messages,
-        conv,
-        start,
-        end,
-        memoryState,
-      )
-      const step = await executeTestStep(
-        'segment_compress',
-        payload,
-        compressSystem,
-        requestConfig,
-      )
-      step.stepLabel = pipelineStepLabel(pipelineStep)
-      steps.push(step)
-
-      if (step.response.status !== 200) {
-        throw new Error(`${step.stepLabel} 失败: HTTP ${step.response.status}`)
-      }
-
-      const parsed = parseModelJson(step.rawContent)
-      if (!parsed) {
-        throw new Error(`${step.stepLabel} 返回非合法 JSON`)
-      }
-
-      const historySegment = String(parsed.history_segment ?? '').trim()
-      if (!historySegment) {
-        throw new Error(`${step.stepLabel} 缺少 history_segment`)
-      }
-
-      const nextMemoryState = (parsed.memory_state as Record<string, unknown> | undefined) ?? {}
-      memoryState = nextMemoryState
-
-      const item: HistorySegmentItem = {
-        id: pipelineStep.segmentIndex,
-        start_round: start,
-        end_round: end,
-        history_segment: historySegment,
-      }
-      segmentOutputs.set(segmentRangeKey(start, end), item)
-      compressSaves.push({
-        segmentIndex: pipelineStep.segmentIndex,
-        parsed,
-      })
-      continue
-    }
-
-    const mergeItems = pipelineStep.segments.map((segment) => {
-      const found = segmentOutputs.get(segmentRangeKey(segment.start, segment.end))
-      if (!found) {
-        throw new Error(`合并步骤缺少 Segment ${segment.start}-${segment.end} 的压缩结果`)
-      }
-      return found
-    })
-    const payload = buildHistoryMergePayload(mergeItems, historyMemory)
-    const step = await executeTestStep('history_merge', payload, mergeSystem, requestConfig)
-    step.stepLabel = pipelineStepLabel(pipelineStep)
-    steps.push(step)
-
-    if (step.response.status !== 200) {
-      throw new Error(`${step.stepLabel} 失败: HTTP ${step.response.status}`)
-    }
-
-    const parsed = parseModelJson(step.rawContent)
-    if (!parsed || !String(parsed.history_memory ?? '').trim()) {
-      throw new Error(`${step.stepLabel} 缺少 history_memory`)
-    }
-    historyMemory = String(parsed.history_memory)
-    mergeSaves.push({
-      mergeSegmentStart: mergeItems[0].id,
-      mergeSegmentEnd: mergeItems[mergeItems.length - 1].id,
-      parsed,
-    })
-  }
-
-  return {
-    model,
-    steps,
-    requestConfig,
-    compressSaves,
-    mergeSaves,
-  }
-}
-
-async function executePipelineRun() {
-  if (!selectedConversation.value) {
-    ElMessage.error('请先选择测试用例')
-    return
-  }
-
-  const models = selectedModelNames.value
-  if (models.length === 0) {
-    ElMessage.error('请至少选择一个模型')
-    return
-  }
-
-  const plan = pipelinePlan.value
-  if (!plan || plan.segments.length === 0) {
-    ElMessage.error('当前轮次范围内没有可执行的 Segment')
-    return
-  }
-
-  running.value = true
-  pipelineForcedTailWarning.value = plan.hasForcedTailMerge
-  lastResponse.value = null
-  rawContent.value = ''
-  reasoningContent.value = ''
-  reasoningExpanded.value = []
-  stepResults.value = []
-  modelRunBundles.value = []
-
-  try {
-    const conv = selectedConversation.value
-    const detail = await getChatQaConversation({
-      user_id: conv.user_id,
-      role_id: conv.role_id,
-      app_name: conv.app_name,
-    })
-    validateRoundRange(roundRange.value.start, roundRange.value.end, detail.messages.length)
-
-    const [compressParts, mergeParts] = await Promise.all([
-      loadPromptParts('segment_compress'),
-      loadPromptParts('history_merge'),
-    ])
-    if (!compressParts.system.trim() || !mergeParts.system.trim()) {
-      ElMessage.error('Segment 压缩或 History 合并 System Prompt 未加载')
-      return
-    }
-
-    const settled = await Promise.allSettled(
-      models.map((model) =>
-        runPipelineForModel(
-          model,
-          plan,
-          detail.messages,
-          conv,
-          compressParts.system,
-          mergeParts.system,
-        ),
-      ),
-    )
-
-    const bundles: ModelRunBundle[] = []
-    let successCount = 0
-    let savedCount = 0
-    let batchRunGroupId = initialBatchRunGroupId()
-
-    for (let i = 0; i < settled.length; i++) {
-      const outcome = settled[i]
-      const model = models[i]
-      if (outcome.status === 'rejected') {
-        bundles.push({
-          model,
-          steps: [],
-          error: outcome.reason instanceof Error ? outcome.reason.message : '管线执行失败',
-        })
-        continue
-      }
-
-      const result = outcome.value
-      bundles.push({ model, steps: result.steps })
-
-      const allOk = result.steps.every((step) => step.response.status === 200)
-      if (!allOk) continue
-      successCount += 1
-
-      try {
-        for (const compressSave of result.compressSaves) {
-          const savedCompress = await saveCompressStep(
-            compressSave.parsed,
-            result.requestConfig,
-            batchRunGroupId,
-            compressSave.segmentIndex,
-          )
-          if (savedCompress?.run_group_id != null && batchRunGroupId == null) {
-            batchRunGroupId = savedCompress.run_group_id
-          }
-        }
-        for (const mergeSave of result.mergeSaves) {
-          const savedMerge = await saveMergeStep(
-            mergeSave.parsed,
-            result.requestConfig,
-            mergeSave.mergeSegmentStart,
-            mergeSave.mergeSegmentEnd,
-            batchRunGroupId,
-          )
-          if (savedMerge?.run_group_id != null && batchRunGroupId == null) {
-            batchRunGroupId = savedMerge.run_group_id
-          }
-        }
-        savedCount += 1
-      } catch {
-        /* 单模型保存失败，继续其余模型 */
-      }
-    }
-
-    modelRunBundles.value = bundles
-    const firstOk = bundles.find((bundle) => bundle.steps.length > 0)
-    if (firstOk?.steps.length) {
-      stepResults.value = firstOk.steps
-      const lastStep = firstOk.steps[firstOk.steps.length - 1]
-      applyStepToDisplay(lastStep)
-    }
-
-    if (models.length === 1) {
-      const bundle = bundles[0]
-      if (bundle?.error) {
-        ElMessage.error(bundle.error)
-      } else if (bundle?.steps.length && bundle.steps.every((step) => step.response.status === 200)) {
-        ElMessage.success(savedCount > 0 ? '链路测试完成，已保存历史 RP 效果' : '链路测试完成')
-      } else {
-        ElMessage.error('链路测试未全部成功，请查看分步结果')
-      }
-    } else {
-      ElMessage.info(
-        `链路并行完成 ${models.length} 个模型：成功 ${successCount}，已保存 ${savedCount}`,
-      )
-    }
-
-    if (savedCount > 0) {
-      await loadRpHistoryOptions()
-      if (selectedRpHistoryKey.value) {
-        await syncRpHistorySelection(selectedRpHistoryKey.value)
-      }
-    }
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '链路测试异常')
-  } finally {
-    running.value = false
   }
 }
 
@@ -1144,12 +466,26 @@ async function runTest() {
     await syncRpHistorySelection(selectedRpHistoryKey.value)
   }
 
-  if (testMode.value === 'pipeline') {
-    await executePipelineRun()
+  if (!selectedConversation.value) {
+    ElMessage.error('请先选择测试用例')
     return
   }
 
-  if (promptType.value === 'history_merge') {
+  const models = selectedModelNames.value
+  if (models.length === 0) {
+    ElMessage.error('请至少选择一个模型')
+    return
+  }
+
+  if (testMode.value === 'pipeline') {
+    const plan = pipelinePlan.value
+    if (!plan || plan.segments.length === 0) {
+      ElMessage.error('当前轮次范围内没有可执行的 Segment')
+      return
+    }
+  }
+
+  if (testMode.value === 'single' && promptType.value === 'history_merge') {
     await refreshSavedRecords()
     if (availableMergeSegments.value.length === 0) {
       ElMessage.error(
@@ -1169,8 +505,61 @@ async function runTest() {
       return
     }
   }
-  pipelineForcedTailWarning.value = false
-  await executeRun({ mode: promptType.value })
+
+  const modelConfigs: RpTestJobCreateBody['model_configs'] = {}
+  for (const model of models) {
+    const cfg = resolveRequestWithModelFallback(model)
+    if (!cfg) {
+      ElMessage.error(`模型 ${model} 配置无效`)
+      return
+    }
+    modelConfigs[model] = {
+      base_url: cfg.base_url,
+      api_key: cfg.api_key,
+      model: cfg.model,
+      temperature: cfg.temperature,
+      top_k: cfg.top_k ?? null,
+      extra_body: cfg.extra_body ?? null,
+    }
+  }
+
+  const conv = selectedConversation.value
+  const body: RpTestJobCreateBody = {
+    test_mode: testMode.value,
+    prompt_type: promptType.value,
+    conversation: {
+      conversation_key: conv.conversation_key,
+      user_id: conv.user_id,
+      role_id: conv.role_id,
+      app_name: conv.app_name,
+      role_name: conv.role_name,
+    },
+    models,
+    model_configs: modelConfigs,
+    version: version.value,
+    lang: lang.value,
+    rp_history_run_id: rpHistoryDetail.value?.run_group_id,
+  }
+
+  if (testMode.value === 'pipeline') {
+    body.round_range = { ...roundRange.value }
+  } else if (promptType.value === 'segment_compress') {
+    body.segment_index = selectedSegmentIndex.value
+  } else {
+    body.merge_segment_count = mergeSegmentCount.value
+    body.merge_segment_end_index = mergeSegmentEndIndex.value
+  }
+
+  try {
+    reasoningExpanded.value = []
+    pipelineForcedTailWarning.value = Boolean(pipelinePlan.value?.hasForcedTailMerge)
+    await startRpTestJob({
+      body,
+      hasForcedTailMerge: pipelinePlan.value?.hasForcedTailMerge,
+    })
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '启动测试失败')
+  }
 }
 
 async function loadRpHistoryOptions() {
@@ -1182,7 +571,9 @@ async function loadRpHistoryOptions() {
 }
 
 watch(promptType, () => {
-  stepResults.value = []
+  if (jobSnapshot.value?.phase !== 'running') {
+    stepResults.value = []
+  }
   if (!selectedRpHistoryKey.value || !rpHistoryDetail.value) return
   applyRunMeta(pickRunMetaForPromptType(rpHistoryDetail.value, promptType.value))
   void refreshSavedRecords()
@@ -1218,6 +609,26 @@ watch(mergeSegmentCount, () => {
   }
 })
 
+const detachRpTestJobRunner = attachRpTestJobRunner({
+  onComplete: async (job) => {
+    await loadRpHistoryOptions()
+    if (selectedRpHistoryKey.value) {
+      await syncRpHistorySelection(selectedRpHistoryKey.value)
+    }
+    const saved = job.progress.saved_count ?? 0
+    if (job.models.length === 1) {
+      ElMessage.success(saved > 0 ? '测试完成，已保存历史 RP 效果' : '测试完成')
+    } else {
+      ElMessage.info(`并行测试完成：已保存 ${saved} 个模型`)
+    }
+  },
+  onError: (message) => {
+    ElMessage.error(message)
+  },
+})
+
+subscribeRpTestJob(applyJobSnapshot)
+
 onMounted(async () => {
   syncWithRegistry()
   await Promise.all([
@@ -1229,6 +640,13 @@ onMounted(async () => {
     resetToFirstModelSelection()
   }
   await refreshSavedRecords()
+  if (selectedConversationKey.value) {
+    await recoverRpTestJob(selectedConversationKey.value)
+  }
+})
+
+onUnmounted(() => {
+  detachRpTestJobRunner()
 })
 
 async function loadVersionOptions() {
@@ -1440,11 +858,14 @@ async function loadVersionOptions() {
               <el-button
                 type="primary"
                 :loading="running"
-                :disabled="!hasValidRuntime"
+                :disabled="!hasValidRuntime || running"
                 @click="runTest"
               >
                 {{ testMode === 'pipeline' ? '运行链路测试' : '运行测试' }}
               </el-button>
+              <p v-if="jobProgressHint" class="hint block-hint job-progress-hint">
+                {{ jobProgressHint }}
+              </p>
             </el-form-item>
             </el-form>
           </div>

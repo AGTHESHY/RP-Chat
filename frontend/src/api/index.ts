@@ -1042,3 +1042,108 @@ export async function getActiveStreamSession(scope: string, taskKey: string) {
     return null
   }
 }
+
+export type RpTestJobStatus = 'running' | 'done' | 'error' | 'cancelled'
+
+export interface RpTestJobStepResult {
+  promptType: PromptType
+  response: ChatCompletionResponse
+  rawContent: string
+  reasoningContent: string
+  stepLabel?: string
+}
+
+export interface RpTestJobModelBundle {
+  model: string
+  steps: RpTestJobStepResult[]
+  error?: string
+}
+
+export interface RpTestJobProgress {
+  model_states: Record<string, unknown>
+  model_bundles: RpTestJobModelBundle[]
+  run_group_id?: number | null
+  saved_count: number
+}
+
+export interface RpTestJob {
+  id: string
+  status: RpTestJobStatus
+  conversation_key: string
+  conversation: {
+    conversation_key: string
+    user_id: string
+    role_id: string
+    app_name: string
+    role_name: string
+  }
+  test_mode: 'pipeline' | 'single'
+  prompt_type: PromptType
+  round_range?: { start: number; end: number } | null
+  segment_index?: number | null
+  merge_segment_count?: number | null
+  merge_segment_end_index?: number | null
+  version: string
+  lang: PromptLang
+  rp_history_run_id?: number | null
+  models: string[]
+  model_configs: Record<string, unknown>
+  plan?: Record<string, unknown> | null
+  has_forced_tail_merge?: boolean
+  progress: RpTestJobProgress
+  error: string
+  created_at: string
+  updated_at: string
+}
+
+export interface RpTestJobCreateBody {
+  test_mode: 'pipeline' | 'single'
+  prompt_type: PromptType
+  conversation: RpTestJob['conversation']
+  models: string[]
+  model_configs: Record<
+    string,
+    {
+      base_url: string
+      api_key: string
+      model: string
+      temperature: number
+      top_k?: number | null
+      extra_body?: Record<string, unknown> | null
+    }
+  >
+  version: string
+  lang: PromptLang
+  round_range?: { start: number; end: number }
+  segment_index?: number
+  merge_segment_count?: number
+  merge_segment_end_index?: number
+  rp_history_run_id?: number
+}
+
+export function createRpTestJob(body: RpTestJobCreateBody) {
+  return request<RpTestJob>('/api/rp-test-jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+export function getRpTestJob(jobId: string) {
+  return request<RpTestJob>(`/api/rp-test-jobs/${jobId}`)
+}
+
+export async function getActiveRpTestJob(conversationKey: string) {
+  const search = new URLSearchParams({ conversation_key: conversationKey })
+  try {
+    return await request<RpTestJob>(`/api/rp-test-jobs/active?${search.toString()}`)
+  } catch {
+    return null
+  }
+}
+
+export function deleteRpTestJob(jobId: string) {
+  return request<{ ok: boolean; cancelled: boolean }>(`/api/rp-test-jobs/${jobId}`, {
+    method: 'DELETE',
+  })
+}
