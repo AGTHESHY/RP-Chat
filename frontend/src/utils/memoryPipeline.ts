@@ -1,17 +1,14 @@
 export const FIRST_SEGMENT_ROUNDS = 10
 export const BATCH_MERGE_SIZE = 4
 
-/** 滑动段：第 1 段 1-10；第 n≥2 段为 10*(n-1)+1 ～ 10*n+1 */
+/** 每段固定 10 轮：段 1 → 1-10，段 2 → 11-20，段 n → (n-1)*10+1 ～ n*10 */
 export function segmentRangeForIndex(segmentIndex: number): SegmentRange {
   if (segmentIndex < 1) {
     throw new Error('segment_index must be >= 1')
   }
-  if (segmentIndex === 1) {
-    return { start: 1, end: 10 }
-  }
   return {
-    start: 10 * (segmentIndex - 1) + 1,
-    end: 10 * segmentIndex + 1,
+    start: (segmentIndex - 1) * FIRST_SEGMENT_ROUNDS + 1,
+    end: segmentIndex * FIRST_SEGMENT_ROUNDS,
   }
 }
 
@@ -62,7 +59,7 @@ export interface PipelinePlan {
   hasForcedTailMerge: boolean
 }
 
-/** 按滑动段公式切分，与用户选定范围取交集 */
+/** 按每段 10 轮网格切分，与用户选定范围取交集 */
 export function splitGlobalSegments(rangeStart: number, rangeEnd: number): SegmentRange[] {
   const start = Math.floor(rangeStart)
   const end = Math.floor(rangeEnd)

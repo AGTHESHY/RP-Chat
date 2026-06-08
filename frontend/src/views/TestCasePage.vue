@@ -355,7 +355,7 @@ onMounted(async () => {
                 </el-select>
               </el-form-item>
               <p class="history-hint">
-                Compress 按段存储（段 1: 1-10，段 2: 11-21…）；Merge 按段窗口存储（如 1-4 段、1-3 段各一条）。
+                Compress 按段存储（每段 10 轮：段 1 → 1-10，段 2 → 11-20…）；Merge 按段窗口存储（如 1-4 段、1-3 段各一条）。
                 链路测试按每 4 段批量合并；尾批不足 4 段时强制合并。单步合并从已保存 compress 段中连续选取 1-4 段。
               </p>
               <div v-if="historyModelDetail" class="history-panels">

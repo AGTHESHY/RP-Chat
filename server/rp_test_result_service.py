@@ -12,12 +12,11 @@ from models import RpCompressResult, RpMergeResult, RpTestRun
 
 
 def segment_range_for_index(segment_index: int) -> tuple[int, int]:
+    """每段固定 10 轮：段 n → (n-1)*10+1 ～ n*10"""
     if segment_index < 1:
         raise ValueError("segment_index must be >= 1")
-    if segment_index == 1:
-        return 1, 10
-    start = 10 * (segment_index - 1) + 1
-    end = 10 * segment_index + 1
+    start = (segment_index - 1) * 10 + 1
+    end = segment_index * 10
     return start, end
 
 
