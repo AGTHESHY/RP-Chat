@@ -356,6 +356,29 @@ function conversationOptionLabel(row: ChatQaConversationSummary): string {
   return `${row.role_name} · 用户 ${row.user_id} · 角色 ${row.role_id} · ${row.message_count} 轮`
 }
 
+function mergeSegmentOptionLabel(segment: MergeableSegment): string {
+  return `段 ${segment.index} · 第 ${segment.start_round}-${segment.end_round} 轮`
+}
+
+function rpHistoryOptionLabel(row: RpHistorySummary): string {
+  const flags = [
+    row.has_compress ? 'C' : '',
+    row.has_merge ? 'M' : '',
+  ]
+    .filter(Boolean)
+    .join('')
+  const time = row.latest_updated_at ? formatHistoryTime(row.latest_updated_at) : ''
+  return [
+    row.role_name,
+    `${row.round_start}-${row.round_end}轮`,
+    flags || null,
+    row.prompt_version || null,
+    time || null,
+  ]
+    .filter(Boolean)
+    .join(' · ')
+}
+
 function applyConversation(row: ChatQaConversationSummary) {
   selectedConversationKey.value = row.conversation_key
   selectedConversation.value = {
@@ -776,9 +799,9 @@ async function loadVersionOptions() {
                 <ul class="pipeline-step-list merge-segment-preview">
                   <li
                     v-for="segment in selectedMergeSegmentsPreview"
-                    :key="`${segment.id}-${segment.start_round}-${segment.end_round}`"
+                    :key="`${segment.index}-${segment.start_round}-${segment.end_round}`"
                   >
-                    段 {{ segment.id }} · 第 {{ segment.start_round }}-{{ segment.end_round }} 轮
+                    段 {{ segment.index }} · 第 {{ segment.start_round }}-{{ segment.end_round }} 轮
                   </li>
                 </ul>
               </el-form-item>
