@@ -108,20 +108,6 @@ const resultTree = computed(() => {
   return buildResultTree(result.value.parsed, props.promptType)
 })
 
-const treeDefaultExpanded = computed(() => {
-  const names = resultTree.value.map((node) => node.id)
-  for (const node of resultTree.value) {
-    const isNarrativeField =
-      node.label === 'history_segment'
-      || node.label === 'history_memory'
-      || node.label === 'history_memory (合并)'
-    if (isNarrativeField && node.children?.length === 1) {
-      names.push(node.children[0].id)
-    }
-  }
-  return names
-})
-
 const validationExpanded = ref<string[]>([])
 
 const validationTitle = computed(() => {
@@ -146,7 +132,7 @@ const validationTitle = computed(() => {
       </div>
       <div class="json-scroll-host">
         <el-scrollbar v-if="formattedJson && viewMode === 'tree'">
-          <ResultTreeView :nodes="resultTree" :default-expanded="treeDefaultExpanded" />
+          <ResultTreeView :nodes="resultTree" />
         </el-scrollbar>
         <el-scrollbar v-else-if="formattedJson && viewMode === 'raw'">
           <pre class="prompt-pre">{{ formattedJson }}</pre>
