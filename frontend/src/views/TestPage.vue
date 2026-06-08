@@ -28,13 +28,23 @@ import { usePageRuntime } from '../composables/usePageRuntime'
 import type { ResolvedRuntimeRequest } from '../utils/apiProfileStorage'
 import {
   buildHistoryMergePayload,
+  buildHistoryMergePayloadFromSingle,
+  buildPipelineCompressSaveResult,
   buildSegmentCompressPayload,
   getSegmentRoundRange,
   parseModelJson,
   promptTypeLabel,
   validateRoundRange,
+  type PipelineSegmentSnapshot,
   type SelectedConversation,
 } from '../utils/conversationPayload'
+import {
+  planMemoryPipeline,
+  pipelinePlanSummary,
+  pipelineStepLabel,
+  type HistorySegmentItem,
+  type PipelinePlan,
+} from '../utils/memoryPipeline'
 
 const testRuntime = usePageRuntime('test')
 const {
@@ -49,6 +59,7 @@ const {
 } = testRuntime
 const versionOptions = ref<string[]>(['v1', 'v2'])
 const version = ref('v2')
+const testMode = ref<'pipeline' | 'single'>('pipeline')
 const promptType = ref<PromptType>('segment_compress')
 const lang = ref<PromptLang>('en')
 
@@ -83,6 +94,7 @@ interface TestStepResult {
   response: ChatCompletionResponse
   rawContent: string
   reasoningContent: string
+  stepLabel?: string
 }
 
 interface ModelRunBundle {
@@ -93,6 +105,7 @@ interface ModelRunBundle {
 
 const stepResults = ref<TestStepResult[]>([])
 const modelRunBundles = ref<ModelRunBundle[]>([])
+const pipelineForcedTailWarning = ref(false)
 
 const rpHistoryOptions = ref<RpHistorySummary[]>([])
 const selectedRpHistoryKey = ref('')
@@ -124,6 +137,20 @@ const systemPrompt = computed(() =>
 const roundRangeHint = computed(() => {
   if (!selectedConversationMaxRounds.value) return ''
   return `共 ${selectedConversationMaxRounds.value} 轮，每轮为一问一答`
+})
+
+const pipelinePlan = computed<PipelinePlan | null>(() => {
+  if (testMode.value !== 'pipeline') return null
+  if (!roundRange.value.start || !roundRange.value.end) return null
+  if (roundRange.value.start > roundRange.value.end) return null
+  return planMemoryPipeline(roundRange.value.start, roundRange.value.end)
+})
+
+const pipelinePreviewSummary = computed(() => {
+  if (!pipelinePlan.value || pipelinePlan.value.segments.length === 0) {
+    return '当前轮次范围内没有可切分的 Segment'
+  }
+  return pipelinePlanSummary(pipelinePlan.value)
 })
 
 const selectedConversationMaxRounds = computed(() => {
@@ -239,7 +266,7 @@ async function buildUserPayload(
     oldHistoryMemory = ''
   }
 
-  return buildHistoryMergePayload(
+  return buildHistoryMergePayloadFromSingle(
     compressExpected,
     range.start,
     range.end,
@@ -573,9 +600,276 @@ async function executeRun(options: ExecuteRunOptions) {
   }
 }
 
+function segmentRangeKey(start: number, end: number): string {
+  return `${start}-${end}`
+}
+
+interface PipelineModelOutcome {
+  model: string
+  steps: TestStepResult[]
+  requestConfig: ResolvedRuntimeRequest
+  compressSave: Record<string, unknown>
+  mergeSave: Record<string, unknown>
+}
+
+async function runPipelineForModel(
+  model: string,
+  plan: PipelinePlan,
+  messages: Awaited<ReturnType<typeof getChatQaConversation>>['messages'],
+  conv: SelectedConversation,
+  compressSystem: string,
+  mergeSystem: string,
+): Promise<PipelineModelOutcome> {
+  const requestConfig = resolveRequestWithModelFallback(model)
+  if (!requestConfig) {
+    throw new Error(`模型 ${model} 配置无效`)
+  }
+
+  const segmentOutputs = new Map<string, HistorySegmentItem>()
+  const pipelineSnapshots: PipelineSegmentSnapshot[] = []
+  let memoryState: Record<string, unknown> = {}
+  let historyMemory = ''
+  let nextSegmentId = 1
+  const steps: TestStepResult[] = []
+
+  for (const pipelineStep of plan.steps) {
+    if (pipelineStep.type === 'compress') {
+      const { start, end } = pipelineStep.segment
+      const payload = buildSegmentCompressPayload(
+        messages,
+        conv,
+        start,
+        end,
+        memoryState,
+      )
+      const step = await executeTestStep(
+        'segment_compress',
+        payload,
+        compressSystem,
+        requestConfig,
+      )
+      step.stepLabel = pipelineStepLabel(pipelineStep)
+      steps.push(step)
+
+      if (step.response.status !== 200) {
+        throw new Error(`${step.stepLabel} 失败: HTTP ${step.response.status}`)
+      }
+
+      const parsed = parseModelJson(step.rawContent)
+      if (!parsed) {
+        throw new Error(`${step.stepLabel} 返回非合法 JSON`)
+      }
+
+      const historySegment = String(parsed.history_segment ?? '').trim()
+      if (!historySegment) {
+        throw new Error(`${step.stepLabel} 缺少 history_segment`)
+      }
+
+      const nextMemoryState = (parsed.memory_state as Record<string, unknown> | undefined) ?? {}
+      memoryState = nextMemoryState
+
+      const item: HistorySegmentItem = {
+        id: nextSegmentId,
+        start_round: start,
+        end_round: end,
+        history_segment: historySegment,
+      }
+      nextSegmentId += 1
+      segmentOutputs.set(segmentRangeKey(start, end), item)
+      pipelineSnapshots.push({
+        start_round: start,
+        end_round: end,
+        history_segment: historySegment,
+        memory_state: nextMemoryState,
+      })
+      continue
+    }
+
+    const mergeItems = pipelineStep.segments.map((segment) => {
+      const found = segmentOutputs.get(segmentRangeKey(segment.start, segment.end))
+      if (!found) {
+        throw new Error(`合并步骤缺少 Segment ${segment.start}-${segment.end} 的压缩结果`)
+      }
+      return found
+    })
+    const payload = buildHistoryMergePayload(mergeItems, historyMemory)
+    const step = await executeTestStep('history_merge', payload, mergeSystem, requestConfig)
+    step.stepLabel = pipelineStepLabel(pipelineStep)
+    steps.push(step)
+
+    if (step.response.status !== 200) {
+      throw new Error(`${step.stepLabel} 失败: HTTP ${step.response.status}`)
+    }
+
+    const parsed = parseModelJson(step.rawContent)
+    if (!parsed || !String(parsed.history_memory ?? '').trim()) {
+      throw new Error(`${step.stepLabel} 缺少 history_memory`)
+    }
+    historyMemory = String(parsed.history_memory)
+  }
+
+  return {
+    model,
+    steps,
+    requestConfig,
+    compressSave: buildPipelineCompressSaveResult(pipelineSnapshots),
+    mergeSave: { history_memory: historyMemory },
+  }
+}
+
+async function executePipelineRun() {
+  if (!selectedConversation.value) {
+    ElMessage.error('请先选择测试用例')
+    return
+  }
+
+  const models = selectedModelNames.value
+  if (models.length === 0) {
+    ElMessage.error('请至少选择一个模型')
+    return
+  }
+
+  const plan = pipelinePlan.value
+  if (!plan || plan.segments.length === 0) {
+    ElMessage.error('当前轮次范围内没有可执行的 Segment')
+    return
+  }
+
+  running.value = true
+  pipelineForcedTailWarning.value = plan.hasForcedTailMerge
+  lastResponse.value = null
+  rawContent.value = ''
+  reasoningContent.value = ''
+  reasoningExpanded.value = []
+  stepResults.value = []
+  modelRunBundles.value = []
+
+  try {
+    const conv = selectedConversation.value
+    const detail = await getChatQaConversation({
+      user_id: conv.user_id,
+      role_id: conv.role_id,
+      app_name: conv.app_name,
+    })
+    validateRoundRange(roundRange.value.start, roundRange.value.end, detail.messages.length)
+
+    const [compressParts, mergeParts] = await Promise.all([
+      loadPromptParts('segment_compress'),
+      loadPromptParts('history_merge'),
+    ])
+    if (!compressParts.system.trim() || !mergeParts.system.trim()) {
+      ElMessage.error('Segment 压缩或 History 合并 System Prompt 未加载')
+      return
+    }
+
+    const settled = await Promise.allSettled(
+      models.map((model) =>
+        runPipelineForModel(
+          model,
+          plan,
+          detail.messages,
+          conv,
+          compressParts.system,
+          mergeParts.system,
+        ),
+      ),
+    )
+
+    const bundles: ModelRunBundle[] = []
+    let successCount = 0
+    let savedCount = 0
+    let batchRunGroupId = initialBatchRunGroupId()
+
+    for (let i = 0; i < settled.length; i++) {
+      const outcome = settled[i]
+      const model = models[i]
+      if (outcome.status === 'rejected') {
+        bundles.push({
+          model,
+          steps: [],
+          error: outcome.reason instanceof Error ? outcome.reason.message : '管线执行失败',
+        })
+        continue
+      }
+
+      const result = outcome.value
+      bundles.push({ model, steps: result.steps })
+
+      const allOk = result.steps.every((step) => step.response.status === 200)
+      if (!allOk) continue
+      successCount += 1
+
+      try {
+        const savedCompress = await saveStepResult(
+          'segment_compress',
+          result.compressSave,
+          result.requestConfig,
+          batchRunGroupId,
+        )
+        if (savedCompress?.run_group_id != null && batchRunGroupId == null) {
+          batchRunGroupId = savedCompress.run_group_id
+        }
+        const savedMerge = await saveStepResult(
+          'history_merge',
+          result.mergeSave,
+          result.requestConfig,
+          batchRunGroupId ?? savedCompress?.run_group_id,
+        )
+        if (savedMerge?.run_group_id != null && batchRunGroupId == null) {
+          batchRunGroupId = savedMerge.run_group_id
+        }
+        if (savedCompress || savedMerge) {
+          savedCount += 1
+        }
+      } catch {
+        /* 单模型保存失败，继续其余模型 */
+      }
+    }
+
+    modelRunBundles.value = bundles
+    const firstOk = bundles.find((bundle) => bundle.steps.length > 0)
+    if (firstOk?.steps.length) {
+      stepResults.value = firstOk.steps
+      const lastStep = firstOk.steps[firstOk.steps.length - 1]
+      applyStepToDisplay(lastStep)
+    }
+
+    if (models.length === 1) {
+      const bundle = bundles[0]
+      if (bundle?.error) {
+        ElMessage.error(bundle.error)
+      } else if (bundle?.steps.length && bundle.steps.every((step) => step.response.status === 200)) {
+        ElMessage.success(savedCount > 0 ? '链路测试完成，已保存历史 RP 效果' : '链路测试完成')
+      } else {
+        ElMessage.error('链路测试未全部成功，请查看分步结果')
+      }
+    } else {
+      ElMessage.info(
+        `链路并行完成 ${models.length} 个模型：成功 ${successCount}，已保存 ${savedCount}`,
+      )
+    }
+
+    if (savedCount > 0) {
+      await loadRpHistoryOptions()
+      if (selectedRpHistoryKey.value) {
+        await syncRpHistorySelection(selectedRpHistoryKey.value)
+      }
+    }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '链路测试异常')
+  } finally {
+    running.value = false
+  }
+}
+
 async function runTest() {
   if (selectedRpHistoryKey.value && !rpHistoryDetail.value) {
     await syncRpHistorySelection(selectedRpHistoryKey.value)
+  }
+
+  if (testMode.value === 'pipeline') {
+    await executePipelineRun()
+    return
   }
 
   if (promptType.value === 'history_merge') {
@@ -598,6 +892,7 @@ async function runTest() {
       }
     }
   }
+  pipelineForcedTailWarning.value = false
   await executeRun({ mode: promptType.value })
 }
 
@@ -609,7 +904,7 @@ async function loadRpHistoryOptions() {
   }
 }
 
-watch([version, promptType, lang], async () => {
+watch([version, promptType, lang, testMode], async () => {
   await loadSystemPrompt()
 })
 
@@ -638,7 +933,9 @@ onMounted(async () => {
 })
 
 async function loadSystemPrompt() {
-  const data = await getVersionPrompt(version.value, promptType.value, lang.value)
+  const type =
+    testMode.value === 'pipeline' ? 'segment_compress' : promptType.value
+  const data = await getVersionPrompt(version.value, type, lang.value)
   promptSfw.value = data.content_sfw
   promptNsfw.value = data.content_nsfw
 }
@@ -688,6 +985,12 @@ async function loadVersionOptions() {
                 />
               </el-select>
             </el-form-item>
+            <el-form-item label="测试模式">
+              <el-radio-group v-model="testMode">
+                <el-radio-button label="pipeline" value="pipeline">链路测试</el-radio-button>
+                <el-radio-button label="single" value="single">单步测试</el-radio-button>
+              </el-radio-group>
+            </el-form-item>
             <el-form-item label="测试轮次">
               <div class="round-range-row">
                 <span class="round-label">第</span>
@@ -709,6 +1012,14 @@ async function loadVersionOptions() {
                 <span class="round-label">轮</span>
               </div>
               <div v-if="roundRangeHint" class="hint block-hint">{{ roundRangeHint }}</div>
+              <div v-if="testMode === 'pipeline' && pipelinePlan" class="pipeline-preview">
+                <div class="pipeline-preview-summary">{{ pipelinePreviewSummary }}</div>
+                <ul v-if="pipelinePlan.segments.length > 0" class="pipeline-step-list">
+                  <li v-for="step in pipelinePlan.steps" :key="pipelineStepLabel(step)">
+                    {{ pipelineStepLabel(step) }}
+                  </li>
+                </ul>
+              </div>
             </el-form-item>
             <el-form-item label="SP 版本">
               <div class="sp-version-row">
@@ -741,7 +1052,7 @@ async function loadVersionOptions() {
                 暂无历史 RP 效果，请先运行测试
               </div>
             </el-form-item>
-            <el-form-item label="类型">
+            <el-form-item v-if="testMode === 'single'" label="类型">
               <div class="prompt-type-row">
                 <el-radio-group v-model="promptType">
                   <el-radio-button label="segment_compress" value="segment_compress">
@@ -783,7 +1094,7 @@ async function loadVersionOptions() {
                   :disabled="!hasValidRuntime"
                   @click="runTest"
                 >
-                  运行测试
+                  {{ testMode === 'pipeline' ? '运行链路测试' : '运行测试' }}
                 </el-button>
               </div>
             </el-form-item>
@@ -809,14 +1120,45 @@ async function loadVersionOptions() {
           </template>
 
           <div class="run-result-body">
-          <template v-if="modelRunBundles.length > 1">
+          <el-alert
+            v-if="pipelineForcedTailWarning"
+            class="pipeline-warning"
+            type="warning"
+            :closable="false"
+            show-icon
+            title="40 轮后尾批不足 4 段，已按测试策略强制合并"
+          />
+          <template v-if="modelRunBundles.length > 0">
             <div
-              v-for="(bundle, index) in modelRunBundles"
+              v-for="(bundle, bundleIndex) in modelRunBundles"
               :key="bundle.model"
               class="model-run-block"
             >
               <h4 class="step-title">模型 · {{ bundle.model }}</h4>
               <p v-if="bundle.error" class="model-run-error">{{ bundle.error }}</p>
+              <template v-else-if="bundle.steps.length > 1">
+                <div
+                  v-for="(step, stepIndex) in bundle.steps"
+                  :key="`${bundle.model}-${stepIndex}`"
+                  class="step-block"
+                >
+                  <h5 class="step-subtitle">{{ step.stepLabel || promptTypeLabel(step.promptType) }}</h5>
+                  <div class="usage">
+                    <el-tag>HTTP {{ step.response.status }}</el-tag>
+                    <span v-if="step.response.usage">
+                      prompt: {{ step.response.usage.prompt_tokens ?? 'N/A' }} |
+                      completion: {{ step.response.usage.completion_tokens ?? 'N/A' }} |
+                      total: {{ step.response.usage.total_tokens ?? 'N/A' }}
+                    </span>
+                  </div>
+                  <ResultPanel
+                    v-if="step.rawContent"
+                    :content="step.rawContent"
+                    :prompt-type="step.promptType"
+                  />
+                  <el-divider v-if="stepIndex < bundle.steps.length - 1" />
+                </div>
+              </template>
               <template v-else-if="bundle.steps[0]">
                 <div class="usage">
                   <el-tag>HTTP {{ bundle.steps[0].response.status }}</el-tag>
@@ -832,12 +1174,16 @@ async function loadVersionOptions() {
                   :prompt-type="bundle.steps[0].promptType"
                 />
               </template>
-              <el-divider v-if="index < modelRunBundles.length - 1" />
+              <el-divider v-if="bundleIndex < modelRunBundles.length - 1" />
             </div>
           </template>
           <template v-else-if="stepResults.length > 1">
-            <div v-for="(step, index) in stepResults" :key="step.promptType" class="step-block">
-              <h4 class="step-title">{{ promptTypeLabel(step.promptType) }}</h4>
+            <div
+              v-for="(step, index) in stepResults"
+              :key="`${step.promptType}-${index}`"
+              class="step-block"
+            >
+              <h4 class="step-title">{{ step.stepLabel || promptTypeLabel(step.promptType) }}</h4>
               <div class="usage">
                 <el-tag>HTTP {{ step.response.status }}</el-tag>
                 <span v-if="step.response.usage">
@@ -959,6 +1305,41 @@ async function loadVersionOptions() {
 .block-hint {
   margin-left: 0;
   margin-top: 6px;
+}
+
+.pipeline-preview {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: #f5f7fa;
+  border-radius: 6px;
+}
+
+.pipeline-preview-summary {
+  font-size: 12px;
+  color: #606266;
+  font-weight: 500;
+}
+
+.pipeline-step-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: #909399;
+}
+
+.pipeline-step-list li + li {
+  margin-top: 4px;
+}
+
+.pipeline-warning {
+  margin-bottom: 12px;
+}
+
+.step-subtitle {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #303133;
 }
 
 .round-range-row {

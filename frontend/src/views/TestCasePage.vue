@@ -353,8 +353,8 @@ onMounted(async () => {
                 </el-select>
               </el-form-item>
               <p class="history-hint">
-                Compress 为结构化输出（<code>history_segment</code> + <code>memory_state</code>）；Merge 仅
-                <code>history_memory</code>，首轮合并时叙事常与 segment 相近，属正常现象。
+                Compress 为结构化输出（<code>history_segment</code> + <code>memory_state</code>）；链路测试会额外保存
+                <code>pipeline_segments</code>。Merge 仅 <code>history_memory</code>：前 40 轮每段合并，40 轮后每 4 段批量合并；尾批不足 4 段时测试页会强制合并并提示。
               </p>
               <div v-if="historyModelDetail" class="history-panels">
                 <div class="json-panel">

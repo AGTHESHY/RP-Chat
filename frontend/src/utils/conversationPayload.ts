@@ -1,4 +1,5 @@
 import type { ChatQaCase, PromptType } from '../api'
+import type { HistorySegmentItem } from './memoryPipeline'
 
 export interface SelectedConversation {
   conversation_key: string
@@ -6,6 +7,13 @@ export interface SelectedConversation {
   role_id: string
   app_name: string
   role_name: string
+}
+
+export interface PipelineSegmentSnapshot {
+  start_round: number
+  end_round: number
+  history_segment: string
+  memory_state: Record<string, unknown>
 }
 
 const DEFAULT_SEGMENT_ROUNDS = 10
@@ -62,6 +70,7 @@ export function buildSegmentCompressPayload(
   conversation: SelectedConversation,
   roundStart = 1,
   roundEnd?: number,
+  oldMemoryState: Record<string, unknown> = {},
 ) {
   const end = roundEnd ?? getSegmentRoundRange(messages.length).end
   const { start, end: validEnd } = validateRoundRange(roundStart, end, messages.length)
@@ -71,10 +80,10 @@ export function buildSegmentCompressPayload(
     history_messages: [
       {
         role: 'user',
-        content: formatConversationRounds(slice, roundStart),
+        content: formatConversationRounds(slice, start),
       },
     ],
-    old_memory_state: {},
+    old_memory_state: oldMemoryState,
     scope: {
       user_id: Number(conversation.user_id) || conversation.user_id,
       bot_id: Number(conversation.role_id) || conversation.role_id,
@@ -89,6 +98,34 @@ export function buildSegmentCompressPayload(
 }
 
 export function buildHistoryMergePayload(
+  segments: HistorySegmentItem[],
+  oldHistoryMemory = '',
+) {
+  if (segments.length === 0) {
+    throw new Error('History 合并至少需要一个 history_segment')
+  }
+
+  const normalized = segments.map((segment, index) => {
+    const historySegment = String(segment.history_segment ?? '').trim()
+    if (!historySegment) {
+      throw new Error(`Segment 压缩期望结果缺少 history_segment（第 ${index + 1} 段）`)
+    }
+    return {
+      id: segment.id ?? index + 1,
+      start_round: segment.start_round,
+      end_round: segment.end_round,
+      history_segment: historySegment,
+    }
+  })
+
+  return {
+    old_history_memory: oldHistoryMemory,
+    new_history_segments: normalized,
+  }
+}
+
+/** 单段合并的便捷封装，兼容单步测试 */
+export function buildHistoryMergePayloadFromSingle(
   compressExpected: Record<string, unknown>,
   roundStart: number,
   roundEnd: number,
@@ -99,9 +136,8 @@ export function buildHistoryMergePayload(
     throw new Error('Segment 压缩期望结果缺少 history_segment')
   }
 
-  return {
-    old_history_memory: oldHistoryMemory,
-    new_history_segments: [
+  return buildHistoryMergePayload(
+    [
       {
         id: 1,
         start_round: roundStart,
@@ -109,6 +145,27 @@ export function buildHistoryMergePayload(
         history_segment: historySegment,
       },
     ],
+    oldHistoryMemory,
+  )
+}
+
+export function buildPipelineCompressSaveResult(
+  segments: PipelineSegmentSnapshot[],
+): Record<string, unknown> {
+  if (segments.length === 0) {
+    throw new Error('管线压缩结果为空')
+  }
+
+  const last = segments[segments.length - 1]
+  return {
+    history_segment: last.history_segment,
+    memory_state: last.memory_state,
+    pipeline_segments: segments.map((segment) => ({
+      start_round: segment.start_round,
+      end_round: segment.end_round,
+      history_segment: segment.history_segment,
+      memory_state: segment.memory_state,
+    })),
   }
 }
 

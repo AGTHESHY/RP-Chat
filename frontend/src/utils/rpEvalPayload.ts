@@ -15,6 +15,9 @@ function slimCompressOutput(
   const slim: Record<string, unknown> = {}
   if ('history_segment' in raw) slim.history_segment = raw.history_segment
   if ('memory_state' in raw) slim.memory_state = raw.memory_state
+  if (Array.isArray(raw.pipeline_segments) && raw.pipeline_segments.length > 0) {
+    slim.pipeline_segments = raw.pipeline_segments
+  }
   return Object.keys(slim).length > 0 ? slim : raw
 }
 
