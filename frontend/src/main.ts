@@ -2,10 +2,13 @@ import { createApp } from 'vue'
 import { ElMessage } from 'element-plus'
 import App from './App.vue'
 import router from './router'
+import { setupElMessageBehavior } from './utils/message'
 import 'element-plus/es/components/message-box/style/css'
 import 'element-plus/es/components/message/style/css'
 import './styles/global.css'
 import './styles/layout.css'
+
+setupElMessageBehavior()
 
 router.onError((error, to) => {
   const message = error instanceof Error ? error.message : String(error)

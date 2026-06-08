@@ -49,6 +49,7 @@ from seed_bootstrap import bootstrap_seed_data
 from rp_test_result_service import (
     RpCompressSaveRequest,
     RpMergeSaveRequest,
+    cleanup_orphan_rp_test_runs,
     delete_rp_history,
     delete_rp_history_models,
     get_rp_history_detail,
@@ -116,6 +117,7 @@ async def lifespan(app: FastAPI):
         migrate_jailbreak_schema(db)
         migrate_chat_qa_schema(db)
         migrate_rp_test_schema(db)
+        cleanup_orphan_rp_test_runs(db)
         migrate_rp_eval_schema(db)
     finally:
         db.close()

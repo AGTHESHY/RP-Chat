@@ -111,3 +111,8 @@ body {
   height: 100%;
   min-width: 0;
 }
+
+/* Toast 不因悬停暂停；计时结束后自动关闭 */
+.el-message {
+  pointer-events: none;
+}

@@ -11,6 +11,49 @@ from sqlalchemy.orm import Session
 from models import RpCompressResult, RpMergeResult, RpTestRun
 
 
+def cleanup_orphan_rp_test_runs(db: Session) -> int:
+    """删除没有任何 compress/merge 子记录的 rp_test_runs 空壳。"""
+    runs = db.query(RpTestRun).all()
+    deleted = 0
+    for run in runs:
+        has_child = (
+            db.query(RpCompressResult.id)
+            .filter(RpCompressResult.run_id == run.id)
+            .first()
+            is not None
+            or db.query(RpMergeResult.id)
+            .filter(RpMergeResult.run_id == run.id)
+            .first()
+            is not None
+        )
+        if not has_child:
+            db.delete(run)
+            deleted += 1
+    if deleted:
+        db.commit()
+    return deleted
+
+
+def _delete_run_if_empty(db: Session, run_id: int) -> bool:
+    has_child = (
+        db.query(RpCompressResult.id)
+        .filter(RpCompressResult.run_id == run_id)
+        .first()
+        is not None
+        or db.query(RpMergeResult.id)
+        .filter(RpMergeResult.run_id == run_id)
+        .first()
+        is not None
+    )
+    if has_child:
+        return False
+    run = db.query(RpTestRun).filter(RpTestRun.id == run_id).first()
+    if not run:
+        return False
+    db.delete(run)
+    return True
+
+
 def segment_range_for_index(segment_index: int) -> tuple[int, int]:
     """每段固定 10 轮：段 n → (n-1)*10+1 ～ n*10"""
     if segment_index < 1:
@@ -622,6 +665,8 @@ def list_rp_history(
             .filter(RpMergeResult.run_id == run.id)
             .all()
         )
+        if not compress_rows and not merge_rows:
+            continue
         model_runs = _build_model_runs(compress_rows, merge_rows)
         round_start = 1
         round_end = 10
@@ -825,6 +870,9 @@ def delete_rp_history_models(
     deleted_ids = [row.id for row in compress_rows + merge_rows]
     for row in compress_rows + merge_rows:
         db.delete(row)
+    run_row = db.query(RpTestRun).filter(RpTestRun.id == resolved_run_id).first()
+    if _delete_run_if_empty(db, resolved_run_id) and run_row:
+        deleted_ids.append(run_row.id)
     db.commit()
 
     return {
