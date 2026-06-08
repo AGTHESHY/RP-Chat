@@ -64,6 +64,7 @@ declare module 'vue' {
     PromptViewer: typeof import('./components/PromptViewer.vue')['default']
     ReasoningCollapse: typeof import('./components/ReasoningCollapse.vue')['default']
     ResultPanel: typeof import('./components/ResultPanel.vue')['default']
+    ResultTreeView: typeof import('./components/ResultTreeView.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
     RpEvalResultView: typeof import('./components/RpEvalResultView.vue')['default']

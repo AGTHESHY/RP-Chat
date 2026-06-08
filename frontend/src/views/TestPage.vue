@@ -19,6 +19,7 @@ import {
   type PromptLang,
   type PromptType,
   type RpCompressSegmentDetail,
+  type RpMergeResultDetail,
   type RpHistoryDetail,
   type RpHistoryRunMeta,
   type RpHistorySummary,
@@ -74,6 +75,14 @@ const selectedConversation = ref<SelectedConversation | null>(null)
 const roundRange = ref({ start: 1, end: 10 })
 const selectedSegmentIndex = ref(1)
 const loadedCompressSegments = ref<RpCompressSegmentDetail[]>([])
+const loadedMergeResults = ref<RpMergeResultDetail[]>([])
+
+interface SavedPreviewPanel {
+  title: string
+  meta: string
+  content: string
+  type: PromptType
+}
 const mergeSegmentCount = ref(1)
 const mergeSegmentEndIndex = ref(1)
 const running = ref(false)
@@ -184,6 +193,110 @@ const selectedCompressRoundLabel = computed(() => {
   return `第 ${range.start}-${range.end} 轮`
 })
 
+const savedPreviewPanel = computed((): SavedPreviewPanel | null => {
+  const model = selectedModelNames.value[0] ?? ''
+
+  if (testMode.value === 'single' && promptType.value === 'segment_compress') {
+    const row = loadedCompressSegments.value.find(
+      (item) => item.segment_index === selectedSegmentIndex.value,
+    )
+    if (!row) return null
+    const previewPayload: Record<string, unknown> = { ...row.expected_result }
+    const priorMerge = [...loadedMergeResults.value]
+      .filter((item) => item.round_end < row.round_start)
+      .sort((a, b) => b.round_end - a.round_end)[0]
+    const mergeMemory = priorMerge?.expected_result?.history_memory
+    if (mergeMemory) {
+      previewPayload._merge_history_memory = mergeMemory
+    }
+    return {
+      title: `已保存 · Compress 段 ${row.segment_index}`,
+      meta: [
+        `第 ${row.round_start}-${row.round_end} 轮`,
+        model,
+        row.updated_at ? formatHistoryTime(row.updated_at) : null,
+      ]
+        .filter(Boolean)
+        .join(' · '),
+      content: JSON.stringify(previewPayload, null, 2),
+      type: 'segment_compress',
+    }
+  }
+
+  if (testMode.value === 'single' && promptType.value === 'history_merge') {
+    if (availableMergeSegments.value.length === 0) return null
+    const window = buildMergeSegmentWindow()
+    const row = loadedMergeResults.value.find(
+      (item) =>
+        item.merge_segment_start === window.start
+        && item.merge_segment_end === window.end,
+    )
+    if (!row) return null
+    return {
+      title: `已保存 · Merge 段 ${window.start}-${window.end}`,
+      meta: [
+        `第 ${row.round_start}-${row.round_end} 轮`,
+        model,
+        row.updated_at ? formatHistoryTime(row.updated_at) : null,
+      ]
+        .filter(Boolean)
+        .join(' · '),
+      content: JSON.stringify(row.expected_result, null, 2),
+      type: 'history_merge',
+    }
+  }
+
+  if (selectedRpHistoryKey.value && rpHistoryDetail.value) {
+    const run =
+      rpHistoryDetail.value.model_runs.find((item) => item.model === model)
+      ?? rpHistoryDetail.value.model_runs[0]
+    if (!run) return null
+    if (promptType.value === 'history_merge' && run.merge) {
+      return {
+        title: '已保存 · Merge',
+        meta: [
+          model,
+          run.merge_run?.updated_at ? formatHistoryTime(run.merge_run.updated_at) : null,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+        content: JSON.stringify(run.merge, null, 2),
+        type: 'history_merge',
+      }
+    }
+    if (run.compress) {
+      const previewPayload: Record<string, unknown> = { ...run.compress }
+      if (run.merge && typeof run.merge === 'object') {
+        const mergeMemory = (run.merge as Record<string, unknown>).history_memory
+        if (mergeMemory) {
+          previewPayload._merge_history_memory = mergeMemory
+        }
+      }
+      return {
+        title: '已保存 · Compress',
+        meta: [
+          `第 ${rpHistoryDetail.value.round_start}-${rpHistoryDetail.value.round_end} 轮`,
+          model,
+          run.compress_run?.updated_at ? formatHistoryTime(run.compress_run.updated_at) : null,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+        content: JSON.stringify(previewPayload, null, 2),
+        type: 'segment_compress',
+      }
+    }
+  }
+
+  return null
+})
+
+const hasRunResult = computed(
+  () =>
+    Boolean(lastResponse.value)
+    || stepResults.value.length > 0
+    || modelRunBundles.value.length > 0,
+)
+
 const maxMergeSegmentCount = computed(() =>
   Math.min(4, availableMergeSegments.value.length),
 )
@@ -236,7 +349,7 @@ function applyConversation(row: ChatQaConversationSummary) {
   }
   roundRange.value = { start: 1, end: Math.min(10, row.message_count) }
   selectedSegmentIndex.value = 1
-  void refreshLoadedCompressSegments()
+  void refreshSavedRecords()
 }
 
 async function loadConversationOptions() {
@@ -267,25 +380,34 @@ watch(selectedConversationKey, (key) => {
   }
 })
 
-async function refreshLoadedCompressSegments() {
+async function refreshSavedRecords() {
   const conv = selectedConversation.value
   const model = selectedModelNames.value[0]
   if (!conv || !model) {
     loadedCompressSegments.value = []
+    loadedMergeResults.value = []
     return
   }
 
+  const query = {
+    user_id: conv.user_id,
+    role_id: conv.role_id,
+    app_name: conv.app_name,
+    prompt_version: version.value,
+    model,
+    run_group_id: rpHistoryDetail.value?.run_group_id,
+  }
+
   try {
-    loadedCompressSegments.value = await listRpCompressResults({
-      user_id: conv.user_id,
-      role_id: conv.role_id,
-      app_name: conv.app_name,
-      prompt_version: version.value,
-      model,
-      run_group_id: rpHistoryDetail.value?.run_group_id,
-    })
+    loadedCompressSegments.value = await listRpCompressResults(query)
   } catch {
     loadedCompressSegments.value = []
+  }
+
+  try {
+    loadedMergeResults.value = await listRpMergeResults(query)
+  } catch {
+    loadedMergeResults.value = []
   }
 
   const indexes = loadedCompressSegments.value.map((row) => row.segment_index)
@@ -355,7 +477,7 @@ async function buildUserPayload(
     throw new Error('请至少选择一个模型')
   }
 
-  await refreshLoadedCompressSegments()
+  await refreshSavedRecords()
   const available = mergeableSegmentsFromRecords(loadedCompressSegments.value)
   const segments = pickConsecutiveSegments(
     available,
@@ -549,7 +671,7 @@ async function syncRpHistorySelection(key: string) {
     await applyRpHistoryContext(detail)
     applyHistoryModelSelection(detail)
     applyRunMeta(pickRunMetaForPromptType(detail, promptType.value))
-    await refreshLoadedCompressSegments()
+    await refreshSavedRecords()
   } catch (error) {
     rpHistoryDetail.value = null
     ElMessage.error(error instanceof Error ? error.message : '加载 RP 历史失败')
@@ -1029,7 +1151,7 @@ async function runTest() {
   }
 
   if (promptType.value === 'history_merge') {
-    await refreshLoadedCompressSegments()
+    await refreshSavedRecords()
     if (availableMergeSegments.value.length === 0) {
       ElMessage.error(
         selectedRpHistoryKey.value
@@ -1064,7 +1186,7 @@ watch(promptType, () => {
   stepResults.value = []
   if (!selectedRpHistoryKey.value || !rpHistoryDetail.value) return
   applyRunMeta(pickRunMetaForPromptType(rpHistoryDetail.value, promptType.value))
-  void refreshLoadedCompressSegments()
+  void refreshSavedRecords()
 })
 
 watch(selectedRpHistoryKey, (key) => {
@@ -1083,7 +1205,7 @@ watch(
     () => rpHistoryDetail.value?.model_runs?.length ?? 0,
   ],
   () => {
-    void refreshLoadedCompressSegments()
+    void refreshSavedRecords()
   },
 )
 
@@ -1107,7 +1229,7 @@ onMounted(async () => {
   if (!selectedRpHistoryKey.value) {
     resetToFirstModelSelection()
   }
-  await refreshLoadedCompressSegments()
+  await refreshSavedRecords()
 })
 
 async function loadVersionOptions() {
@@ -1333,10 +1455,28 @@ async function loadVersionOptions() {
       <el-col :span="12" class="main-col">
         <el-card shadow="never" class="result-card">
           <template #header>
-            <span>返回结果</span>
+            <div class="panel-header result-card-header">
+              <span class="panel-title">返回结果</span>
+              <div v-if="savedPreviewPanel" class="saved-preview-header">
+                <span class="saved-preview-title">{{ savedPreviewPanel.title }}</span>
+                <span class="saved-preview-meta">{{ savedPreviewPanel.meta }}</span>
+              </div>
+            </div>
           </template>
 
           <div class="run-result-body">
+          <div v-if="savedPreviewPanel" class="saved-preview-block">
+            <ResultPanel
+              :content="savedPreviewPanel.content"
+              :prompt-type="savedPreviewPanel.type"
+            />
+            <el-divider v-if="hasRunResult" />
+          </div>
+          <div
+            v-if="hasRunResult"
+            class="run-result-extra"
+            :class="savedPreviewPanel ? 'run-result-extra--with-preview' : 'run-result-extra--solo'"
+          >
           <el-alert
             v-if="pipelineForcedTailWarning"
             class="pipeline-warning"
@@ -1436,10 +1576,13 @@ async function loadVersionOptions() {
               </el-collapse-item>
             </el-collapse>
 
-            <ResultPanel v-if="rawContent" :content="rawContent" :prompt-type="promptType" />
+            <div v-if="rawContent" class="run-result-panel-host">
+              <ResultPanel :content="rawContent" :prompt-type="promptType" />
+            </div>
           </template>
+          </div>
           <el-empty
-            v-if="!lastResponse && stepResults.length === 0 && modelRunBundles.length === 0"
+            v-if="!hasRunResult && !savedPreviewPanel"
             description="运行测试后在此查看结果"
             :image-size="72"
           />
@@ -1586,6 +1729,48 @@ async function loadVersionOptions() {
   margin-bottom: 12px;
 }
 
+.result-card-header {
+  width: 100%;
+}
+
+.saved-preview-header {
+  min-width: 0;
+  max-width: 62%;
+  text-align: right;
+}
+
+.saved-preview-title {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  color: #303133;
+  line-height: 1.4;
+}
+
+.saved-preview-header .saved-preview-meta {
+  display: block;
+  margin: 0;
+  font-size: 12px;
+  color: #909399;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.saved-preview-block {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 4px;
+}
+
+.saved-preview-block :deep(.result-panel) {
+  flex: 1;
+  min-height: 0;
+}
+
 .step-subtitle {
   margin: 0 0 8px;
   font-size: 13px;
@@ -1714,7 +1899,33 @@ async function loadVersionOptions() {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+}
+
+.run-result-extra--with-preview {
+  flex-shrink: 0;
+  max-height: 42%;
   overflow: auto;
+}
+
+.run-result-extra--solo {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.run-result-panel-host {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.run-result-panel-host :deep(.result-panel) {
+  flex: 1;
+  min-height: 0;
 }
 
 .reasoning-tag {

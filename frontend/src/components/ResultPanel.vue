@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import type { PromptType } from '../api'
+import ResultTreeView from './ResultTreeView.vue'
+import { buildResultTree } from '../utils/resultTree'
 
 const props = defineProps<{
   content: string
@@ -98,37 +100,85 @@ const formattedJson = computed(() => {
   if (!result.value.parsed) return ''
   return JSON.stringify(result.value.parsed, null, 2)
 })
+
+const viewMode = ref<'tree' | 'raw'>('tree')
+
+const resultTree = computed(() => {
+  if (!result.value.parsed) return []
+  return buildResultTree(result.value.parsed, props.promptType)
+})
+
+const treeDefaultExpanded = computed(() => {
+  const names = resultTree.value.map((node) => node.id)
+  for (const node of resultTree.value) {
+    const isNarrativeField =
+      node.label === 'history_segment'
+      || node.label === 'history_memory'
+      || node.label === 'history_memory (合并)'
+    if (isNarrativeField && node.children?.length === 1) {
+      names.push(node.children[0].id)
+    }
+  }
+  return names
+})
+
+const validationExpanded = ref<string[]>([])
+
+const validationTitle = computed(() => {
+  const checks = result.value.checks
+  if (result.value.error) return 'JSON 解析验证 · 解析失败'
+  if (!checks.length) return 'JSON 解析验证'
+  const passed = checks.filter((item) => item.ok).length
+  return `JSON 解析验证 · ${passed}/${checks.length} 通过`
+})
+
 </script>
 
 <template>
   <div class="result-panel">
     <div class="section json-output-section">
-      <h4>格式化 JSON</h4>
-      <el-scrollbar v-if="formattedJson" max-height="240px">
-        <pre class="prompt-pre">{{ formattedJson }}</pre>
-      </el-scrollbar>
-      <p v-else class="json-empty">暂无可用 JSON（见下方解析说明）</p>
+      <div class="json-output-header">
+        <h4>结果预览</h4>
+        <el-radio-group v-if="formattedJson" v-model="viewMode" size="small" class="view-mode-switch">
+          <el-radio-button value="tree">树形</el-radio-button>
+          <el-radio-button value="raw">原始 JSON</el-radio-button>
+        </el-radio-group>
+      </div>
+      <div class="json-scroll-host">
+        <el-scrollbar v-if="formattedJson && viewMode === 'tree'">
+          <ResultTreeView :nodes="resultTree" :default-expanded="treeDefaultExpanded" />
+        </el-scrollbar>
+        <el-scrollbar v-else-if="formattedJson && viewMode === 'raw'">
+          <pre class="prompt-pre">{{ formattedJson }}</pre>
+        </el-scrollbar>
+        <p v-else class="json-empty">暂无可用 JSON（可展开下方解析验证查看说明）</p>
+      </div>
     </div>
 
-    <div class="section">
-      <h4>JSON 解析验证</h4>
-      <p v-if="result.error" class="error">解析失败: {{ result.error }}</p>
-      <ul v-if="result.checks.length" class="checks">
-        <li v-for="item in result.checks" :key="item.label">
-          <span :class="item.ok ? 'ok' : 'fail'">{{ item.ok ? '✅' : '❌' }}</span>
-          {{ item.label }}
-        </li>
-      </ul>
-      <div v-if="result.segmentLength !== undefined" class="meta">
-        history_segment 长度: {{ result.segmentLength }} chars
-      </div>
-      <div v-if="result.memoryStateLength !== undefined" class="meta">
-        memory_state 长度: {{ result.memoryStateLength }} chars
-      </div>
-      <div v-if="result.historyMemoryLength !== undefined" class="meta">
-        history_memory 长度: {{ result.historyMemoryLength }} chars
-      </div>
-    </div>
+    <el-collapse
+      v-if="content"
+      v-model="validationExpanded"
+      class="validation-collapse validation-footer"
+    >
+      <el-collapse-item name="validation" :title="validationTitle">
+        <p v-if="result.error" class="error">解析失败: {{ result.error }}</p>
+        <ul v-if="result.checks.length" class="checks">
+          <li v-for="item in result.checks" :key="item.label">
+            <span :class="item.ok ? 'ok' : 'fail'">{{ item.ok ? '✅' : '❌' }}</span>
+            {{ item.label }}
+          </li>
+        </ul>
+        <div v-if="result.segmentLength !== undefined" class="meta">
+          history_segment 长度: {{ result.segmentLength }} chars
+        </div>
+        <div v-if="result.memoryStateLength !== undefined" class="meta">
+          memory_state 长度: {{ result.memoryStateLength }} chars
+        </div>
+        <div v-if="result.historyMemoryLength !== undefined" class="meta">
+          history_memory 长度: {{ result.historyMemoryLength }} chars
+        </div>
+      </el-collapse-item>
+    </el-collapse>
   </div>
 </template>
 
@@ -136,12 +186,43 @@ const formattedJson = computed(() => {
 .result-panel {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  min-height: 280px;
+  height: 100%;
+  gap: 0;
 }
 
-.section h4 {
-  margin: 0 0 8px;
+.json-output-section {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.json-output-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+
+.json-output-header h4 {
+  margin: 0;
   font-size: 14px;
+}
+
+.view-mode-switch {
+  flex-shrink: 0;
+}
+
+.json-scroll-host {
+  flex: 1;
+  min-height: 0;
+}
+
+.json-scroll-host :deep(.el-scrollbar) {
+  height: 100%;
 }
 
 .checks {
@@ -178,5 +259,34 @@ const formattedJson = computed(() => {
   margin: 0;
   font-size: 13px;
   color: #909399;
+}
+
+.validation-footer {
+  flex-shrink: 0;
+  margin-top: 8px;
+  padding-top: 4px;
+  border-top: 1px solid #ebeef5;
+}
+
+.validation-collapse {
+  border: none;
+}
+
+.validation-collapse :deep(.el-collapse-item__header) {
+  height: 36px;
+  line-height: 36px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #303133;
+  border: none;
+  background: transparent;
+}
+
+.validation-collapse :deep(.el-collapse-item__wrap) {
+  border: none;
+}
+
+.validation-collapse :deep(.el-collapse-item__content) {
+  padding-bottom: 4px;
 }
 </style>
