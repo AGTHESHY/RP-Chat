@@ -47,6 +47,8 @@ const historyModelDetail = computed(() => {
     ...base,
     compress: run.compress,
     merge: run.merge,
+    compress_segments: run.compress_segments ?? [],
+    merge_results: run.merge_results ?? [],
     compress_run: run.compress_run,
     merge_run: run.merge_run,
   }
@@ -353,31 +355,45 @@ onMounted(async () => {
                 </el-select>
               </el-form-item>
               <p class="history-hint">
-                Compress 为结构化输出（<code>history_segment</code> + <code>memory_state</code>）；链路测试会额外保存
-                <code>pipeline_segments</code>。Merge 仅 <code>history_memory</code>：前 40 轮每段合并，40 轮后每 4 段批量合并；尾批不足 4 段时测试页会强制合并并提示。
+                Compress 按段存储（段 1: 1-10，段 2: 11-21…）；Merge 按段窗口存储（如 1-4 段、1-3 段各一条）。
+                链路测试按每 4 段批量合并；尾批不足 4 段时强制合并。单步合并从已保存 compress 段中连续选取 1-4 段。
               </p>
               <div v-if="historyModelDetail" class="history-panels">
                 <div class="json-panel">
-                  <div class="json-panel-title">Compress</div>
+                  <div class="json-panel-title">Compress 段</div>
                   <p class="run-meta">{{ formatRunMeta(historyModelDetail.compress_run) }}</p>
                   <el-scrollbar class="json-panel-scroll">
-                    <JsonVisualViewer
-                      v-if="historyModelDetail.compress"
-                      :key="`${selectedHistoryKey}-${selectedHistoryModel}-compress`"
-                      :data="historyModelDetail.compress"
-                    />
+                    <template v-if="historyModelDetail.compress_segments.length > 0">
+                      <div
+                        v-for="segment in historyModelDetail.compress_segments"
+                        :key="`${selectedHistoryKey}-${selectedHistoryModel}-compress-${segment.id}`"
+                        class="history-segment-block"
+                      >
+                        <div class="history-segment-title">
+                          段 {{ segment.segment_index }} · 第 {{ segment.round_start }}-{{ segment.round_end }} 轮
+                        </div>
+                        <JsonVisualViewer :data="segment.expected_result" />
+                      </div>
+                    </template>
                     <el-empty v-else description="暂无 Compress 结果" :image-size="64" />
                   </el-scrollbar>
                 </div>
                 <div class="json-panel">
-                  <div class="json-panel-title">Merge</div>
+                  <div class="json-panel-title">Merge 记录</div>
                   <p class="run-meta">{{ formatRunMeta(historyModelDetail.merge_run) }}</p>
                   <el-scrollbar class="json-panel-scroll">
-                    <JsonVisualViewer
-                      v-if="historyModelDetail.merge"
-                      :key="`${selectedHistoryKey}-${selectedHistoryModel}-merge`"
-                      :data="historyModelDetail.merge"
-                    />
+                    <template v-if="historyModelDetail.merge_results.length > 0">
+                      <div
+                        v-for="merge in historyModelDetail.merge_results"
+                        :key="`${selectedHistoryKey}-${selectedHistoryModel}-merge-${merge.id}`"
+                        class="history-segment-block"
+                      >
+                        <div class="history-segment-title">
+                          段 {{ merge.merge_segment_start }}-{{ merge.merge_segment_end }} · 第 {{ merge.round_start }}-{{ merge.round_end }} 轮
+                        </div>
+                        <JsonVisualViewer :data="merge.expected_result" />
+                      </div>
+                    </template>
                     <el-empty v-else description="暂无 Merge 结果" :image-size="64" />
                   </el-scrollbar>
                 </div>
@@ -524,6 +540,19 @@ onMounted(async () => {
   color: #606266;
   background: #f5f7fa;
   border-bottom: 1px solid #ebeef5;
+}
+
+.history-segment-block + .history-segment-block {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed #ebeef5;
+}
+
+.history-segment-title {
+  margin-bottom: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #303133;
 }
 
 .json-panel-scroll {

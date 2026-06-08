@@ -5,8 +5,8 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from models import PromptTestResult
-from prompt_test_result_service import PromptTestResultSaveRequest, save_prompt_test_result
+from models import RpTestRun
+from rp_test_result_service import RpCompressSaveRequest, RpMergeSaveRequest, save_compress, save_merge
 
 SERVER_DIR = Path(__file__).resolve().parent
 RP_HISTORY_SEED_DIR = SERVER_DIR / "seed_data" / "rp_history"
@@ -16,14 +16,14 @@ MANDY_COMPRESS_FILE = RP_HISTORY_SEED_DIR / "mandy_segment_compress.json"
 MANDY_MERGE_FILE = RP_HISTORY_SEED_DIR / "mandy_history_merge.json"
 
 
-def _has_result(db: Session, *, user_id: str, role_id: str, app_name: str, prompt_type: str) -> bool:
+def _has_run(db: Session, *, user_id: str, role_id: str, app_name: str, prompt_version: str) -> bool:
     return (
-        db.query(PromptTestResult)
+        db.query(RpTestRun)
         .filter(
-            PromptTestResult.user_id == user_id,
-            PromptTestResult.role_id == role_id,
-            PromptTestResult.app_name == app_name,
-            PromptTestResult.prompt_type == prompt_type,
+            RpTestRun.user_id == user_id,
+            RpTestRun.role_id == role_id,
+            RpTestRun.app_name == app_name,
+            RpTestRun.prompt_version == prompt_version,
         )
         .first()
         is not None
@@ -31,7 +31,7 @@ def _has_result(db: Session, *, user_id: str, role_id: str, app_name: str, promp
 
 
 def seed_mandy_rp_history(db: Session) -> int:
-    """Import default Mandy compress + merge results into prompt_test_results."""
+    """Import default Mandy compress + merge results into segment tables."""
     if not MANDY_META_FILE.is_file():
         return 0
 
@@ -39,40 +39,52 @@ def seed_mandy_rp_history(db: Session) -> int:
     user_id = meta["user_id"]
     role_id = meta["role_id"]
     app_name = meta["app_name"]
-    inserted = 0
-
-    seeds: list[tuple[str, Path]] = [
-        ("segment_compress", MANDY_COMPRESS_FILE),
-        ("history_merge", MANDY_MERGE_FILE),
-    ]
     model = (meta.get("model") or "").strip() or "seed-import"
     prompt_version = (meta.get("prompt_version") or "").strip()
-    run_group_id: int | None = None
 
-    for prompt_type, path in seeds:
-        if _has_result(db, user_id=user_id, role_id=role_id, app_name=app_name, prompt_type=prompt_type):
-            continue
-        if not path.is_file():
-            continue
-        expected_result = json.loads(path.read_text(encoding="utf-8"))
-        saved = save_prompt_test_result(
+    if _has_run(
+        db,
+        user_id=user_id,
+        role_id=role_id,
+        app_name=app_name,
+        prompt_version=prompt_version,
+    ):
+        return 0
+
+    inserted = 0
+    if MANDY_COMPRESS_FILE.is_file():
+        expected_result = json.loads(MANDY_COMPRESS_FILE.read_text(encoding="utf-8"))
+        save_compress(
             db,
-            PromptTestResultSaveRequest(
+            RpCompressSaveRequest(
                 user_id=user_id,
                 role_id=role_id,
                 app_name=app_name,
                 role_name=meta["role_name"],
-                prompt_type=prompt_type,
-                expected_result=expected_result,
-                round_start=meta.get("round_start", 1),
-                round_end=meta.get("round_end", 10),
                 prompt_version=prompt_version,
+                segment_index=1,
+                expected_result=expected_result,
                 model=model,
-                run_group_id=run_group_id,
             ),
         )
-        if run_group_id is None and saved.get("run_group_id") is not None:
-            run_group_id = int(saved["run_group_id"])
+        inserted += 1
+
+    if MANDY_MERGE_FILE.is_file():
+        expected_result = json.loads(MANDY_MERGE_FILE.read_text(encoding="utf-8"))
+        save_merge(
+            db,
+            RpMergeSaveRequest(
+                user_id=user_id,
+                role_id=role_id,
+                app_name=app_name,
+                role_name=meta["role_name"],
+                prompt_version=prompt_version,
+                merge_segment_start=1,
+                merge_segment_end=1,
+                expected_result=expected_result,
+                model=model,
+            ),
+        )
         inserted += 1
 
     return inserted

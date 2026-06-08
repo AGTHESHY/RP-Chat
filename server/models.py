@@ -81,21 +81,104 @@ class JailbreakPrompt(Base):
     )
 
 
-class PromptTestResult(Base):
-    __tablename__ = "prompt_test_results"
+class RpTestRun(Base):
+    __tablename__ = "rp_test_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "role_id",
+            "app_name",
+            "prompt_version",
+            name="uk_rp_test_run_conv_sp",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     role_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     app_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     role_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
-    run_group_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0, index=True)
-    prompt_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    expected_result: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class RpCompressResult(Base):
+    __tablename__ = "rp_compress_results"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "role_id",
+            "app_name",
+            "prompt_version",
+            "model",
+            "segment_index",
+            name="uk_rp_compress_segment",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    role_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    app_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    prompt_version: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    segment_index: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     round_start: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     round_end: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
-    prompt_version: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     model: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    expected_result: Mapped[str] = mapped_column(Text, nullable=False)
+    top_k: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    temperature: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class RpMergeResult(Base):
+    __tablename__ = "rp_merge_results"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "role_id",
+            "app_name",
+            "prompt_version",
+            "model",
+            "merge_segment_start",
+            "merge_segment_end",
+            name="uk_rp_merge_window",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    role_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    app_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    prompt_version: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    merge_segment_start: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    merge_segment_end: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    round_start: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    round_end: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    model: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    expected_result: Mapped[str] = mapped_column(Text, nullable=False)
     top_k: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     temperature: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     created_at: Mapped[datetime] = mapped_column(

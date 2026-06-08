@@ -52,49 +52,50 @@ export interface DraftUpdatePayload {
   doc_content?: string
 }
 
-export interface PromptTestResultSummary {
+export interface RpCompressSegmentDetail {
   id: number
+  run_id: number
+  run_group_id: number
   user_id: string
   role_id: string
   app_name: string
-  role_name: string
-  run_group_id: number
-  prompt_type: PromptType
+  prompt_version: string
+  segment_index: number
   round_start: number
   round_end: number
-  prompt_version: string
   model: string
+  expected_result: Record<string, unknown>
   top_k: number | null
   temperature: number
   created_at: string | null
   updated_at: string | null
 }
 
-export interface PromptTestResultDetail extends PromptTestResultSummary {
-  expected_result: Record<string, unknown>
-}
-
-export function listPromptTestResults(params?: {
-  user_id?: string
-  role_id?: string
-  role_name?: string
-  prompt_type?: string
-  run_group_id?: number
-}) {
-  return request<PromptTestResultSummary[]>(
-    `/api/prompt-test-results${buildQuery(params ?? {})}`,
-  )
-}
-
-export function getPromptTestResult(id: number) {
-  return request<PromptTestResultDetail>(`/api/prompt-test-results/${id}`)
-}
-
-export function getPromptTestResultByConversation(params: {
+export interface RpMergeResultDetail {
+  id: number
+  run_id: number
+  run_group_id: number
   user_id: string
   role_id: string
   app_name: string
-  prompt_type: PromptType
+  prompt_version: string
+  merge_segment_start: number
+  merge_segment_end: number
+  round_start: number
+  round_end: number
+  model: string
+  expected_result: Record<string, unknown>
+  top_k: number | null
+  temperature: number
+  created_at: string | null
+  updated_at: string | null
+}
+
+export function listRpCompressResults(params: {
+  user_id: string
+  role_id: string
+  app_name: string
+  prompt_version?: string
   model?: string
   run_group_id?: number
 }) {
@@ -102,31 +103,69 @@ export function getPromptTestResultByConversation(params: {
   search.set('user_id', params.user_id)
   search.set('role_id', params.role_id)
   search.set('app_name', params.app_name)
-  search.set('prompt_type', params.prompt_type)
+  if (params.prompt_version) search.set('prompt_version', params.prompt_version)
   if (params.model) search.set('model', params.model)
   if (params.run_group_id != null) search.set('run_group_id', String(params.run_group_id))
-  return request<PromptTestResultDetail>(
-    `/api/prompt-test-results/by-conversation?${search.toString()}`,
+  return request<RpCompressSegmentDetail[]>(
+    `/api/rp-compress-results?${search.toString()}`,
   )
 }
 
-export function savePromptTestResult(body: {
+export function saveRpCompressResult(body: {
   user_id: string
   role_id: string
   app_name: string
   role_name: string
-  prompt_type: PromptType
-  expected_result: Record<string, unknown>
-  round_start: number
-  round_end: number
   prompt_version: string
+  segment_index: number
+  expected_result: Record<string, unknown>
   model: string
   top_k: number | null
   temperature: number
-  /** 重跑：归属到该请求，按 model+prompt_type upsert */
+  run_id?: number
+}) {
+  return request<RpCompressSegmentDetail>('/api/rp-compress-results', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+export function listRpMergeResults(params: {
+  user_id: string
+  role_id: string
+  app_name: string
+  prompt_version?: string
+  model?: string
   run_group_id?: number
 }) {
-  return request<PromptTestResultDetail>('/api/prompt-test-results', {
+  const search = new URLSearchParams()
+  search.set('user_id', params.user_id)
+  search.set('role_id', params.role_id)
+  search.set('app_name', params.app_name)
+  if (params.prompt_version) search.set('prompt_version', params.prompt_version)
+  if (params.model) search.set('model', params.model)
+  if (params.run_group_id != null) search.set('run_group_id', String(params.run_group_id))
+  return request<RpMergeResultDetail[]>(
+    `/api/rp-merge-results?${search.toString()}`,
+  )
+}
+
+export function saveRpMergeResult(body: {
+  user_id: string
+  role_id: string
+  app_name: string
+  role_name: string
+  prompt_version: string
+  merge_segment_start: number
+  merge_segment_end: number
+  expected_result: Record<string, unknown>
+  model: string
+  top_k: number | null
+  temperature: number
+  run_id?: number
+}) {
+  return request<RpMergeResultDetail>('/api/rp-merge-results', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -153,6 +192,8 @@ export interface RpHistorySummary {
 
 export interface RpHistoryModelRun {
   model: string
+  compress_segments: RpCompressSegmentDetail[]
+  merge_results: RpMergeResultDetail[]
   compress_record_id: number | null
   merge_record_id: number | null
   compress: Record<string, unknown> | null

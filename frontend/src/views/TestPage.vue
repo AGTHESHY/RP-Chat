@@ -4,19 +4,21 @@ import { ElMessage } from 'element-plus'
 import {
   composePrompt,
   getChatQaConversation,
-  getPromptTestResultByConversation,
   getRpHistoryDetail,
   getVersionPrompt,
   listChatQaConversations,
+  listRpCompressResults,
+  listRpMergeResults,
   listRpHistory,
   listVersions,
   runChatCompletion,
-  savePromptTestResult,
+  saveRpCompressResult,
+  saveRpMergeResult,
   type ChatCompletionResponse,
-  type PromptTestResultDetail,
   type ChatQaConversationSummary,
   type PromptLang,
   type PromptType,
+  type RpCompressSegmentDetail,
   type RpHistoryDetail,
   type RpHistoryRunMeta,
   type RpHistorySummary,
@@ -28,14 +30,16 @@ import { usePageRuntime } from '../composables/usePageRuntime'
 import type { ResolvedRuntimeRequest } from '../utils/apiProfileStorage'
 import {
   buildHistoryMergePayload,
-  buildHistoryMergePayloadFromSingle,
-  buildPipelineCompressSaveResult,
   buildSegmentCompressPayload,
   getSegmentRoundRange,
+  maxNextSegmentIndex,
+  mergeableSegmentsFromRecords,
+  mergeRoundRangeFromSegments,
   parseModelJson,
+  pickConsecutiveSegments,
   promptTypeLabel,
   validateRoundRange,
-  type PipelineSegmentSnapshot,
+  type MergeableSegment,
   type SelectedConversation,
 } from '../utils/conversationPayload'
 import {
@@ -64,13 +68,14 @@ const testMode = ref<'pipeline' | 'single'>('pipeline')
 const promptType = ref<PromptType>('segment_compress')
 const lang = ref<PromptLang>('en')
 
-const promptSfw = ref('')
-const promptNsfw = ref('')
-
 const conversationOptions = ref<ChatQaConversationSummary[]>([])
 const selectedConversationKey = ref<string>('')
 const selectedConversation = ref<SelectedConversation | null>(null)
 const roundRange = ref({ start: 1, end: 10 })
+const selectedSegmentIndex = ref(1)
+const loadedCompressSegments = ref<RpCompressSegmentDetail[]>([])
+const mergeSegmentCount = ref(1)
+const mergeSegmentEndIndex = ref(1)
 const running = ref(false)
 const lastResponse = ref<ChatCompletionResponse | null>(null)
 const rawContent = ref('')
@@ -118,10 +123,6 @@ const rpHistoryTypeHint = computed(() => {
   return ''
 })
 
-const systemPrompt = computed(() =>
-  composePrompt(promptSfw.value, promptNsfw.value, false),
-)
-
 const roundRangeHint = computed(() => {
   if (!selectedConversationMaxRounds.value) return ''
   return `共 ${selectedConversationMaxRounds.value} 轮，每轮为一问一答`
@@ -146,6 +147,72 @@ const pipelineCycleLines = computed(() => {
   return formatPipelineCycleLines(pipelinePlan.value)
 })
 
+const availableMergeSegments = computed<MergeableSegment[]>(() => {
+  try {
+    return mergeableSegmentsFromRecords(loadedCompressSegments.value)
+  } catch {
+    return []
+  }
+})
+
+const compressSegmentOptions = computed(() => {
+  const existing = loadedCompressSegments.value.map((row) => row.segment_index)
+  const next = maxNextSegmentIndex(existing, selectedConversationMaxRounds.value)
+  const options: Array<{ index: number; label: string }> = []
+  for (const index of [...new Set(existing)].sort((a, b) => a - b)) {
+    const range = getSegmentRoundRange(index, selectedConversationMaxRounds.value || 1)
+    options.push({
+      index,
+      label: `段 ${index} · 第 ${range.start}-${range.end} 轮（重跑）`,
+    })
+  }
+  if (next != null) {
+    const range = getSegmentRoundRange(next, selectedConversationMaxRounds.value || 1)
+    options.push({
+      index: next,
+      label: `段 ${next} · 第 ${range.start}-${range.end} 轮（新增）`,
+    })
+  }
+  return options
+})
+
+const selectedCompressRoundLabel = computed(() => {
+  const range = getSegmentRoundRange(
+    selectedSegmentIndex.value,
+    selectedConversationMaxRounds.value || 1,
+  )
+  return `第 ${range.start}-${range.end} 轮`
+})
+
+const maxMergeSegmentCount = computed(() =>
+  Math.min(4, availableMergeSegments.value.length),
+)
+
+const mergeSegmentEndOptions = computed(() => availableMergeSegments.value)
+
+const selectedMergeSegmentsPreview = computed(() => {
+  if (availableMergeSegments.value.length === 0) return []
+  try {
+    return pickConsecutiveSegments(
+      availableMergeSegments.value,
+      mergeSegmentCount.value,
+      mergeSegmentEndIndex.value,
+    )
+  } catch {
+    return []
+  }
+})
+
+const showRoundRangePicker = computed(() => testMode.value === 'pipeline')
+
+const showCompressSegmentPicker = computed(
+  () => testMode.value === 'single' && promptType.value === 'segment_compress',
+)
+
+const showMergeSegmentPicker = computed(
+  () => testMode.value === 'single' && promptType.value === 'history_merge',
+)
+
 const selectedConversationMaxRounds = computed(() => {
   if (!selectedConversationKey.value) return 0
   const row = conversationOptions.value.find(
@@ -167,7 +234,9 @@ function applyConversation(row: ChatQaConversationSummary) {
     app_name: row.app_name,
     role_name: row.role_name,
   }
-  roundRange.value = getSegmentRoundRange(row.message_count)
+  roundRange.value = { start: 1, end: Math.min(10, row.message_count) }
+  selectedSegmentIndex.value = 1
+  void refreshLoadedCompressSegments()
 }
 
 async function loadConversationOptions() {
@@ -198,9 +267,58 @@ watch(selectedConversationKey, (key) => {
   }
 })
 
+async function refreshLoadedCompressSegments() {
+  const conv = selectedConversation.value
+  const model = selectedModelNames.value[0]
+  if (!conv || !model) {
+    loadedCompressSegments.value = []
+    return
+  }
+
+  try {
+    loadedCompressSegments.value = await listRpCompressResults({
+      user_id: conv.user_id,
+      role_id: conv.role_id,
+      app_name: conv.app_name,
+      prompt_version: version.value,
+      model,
+      run_group_id: rpHistoryDetail.value?.run_group_id,
+    })
+  } catch {
+    loadedCompressSegments.value = []
+  }
+
+  const indexes = loadedCompressSegments.value.map((row) => row.segment_index)
+  const next = maxNextSegmentIndex(indexes, selectedConversationMaxRounds.value)
+  const allowed = new Set([...indexes, ...(next != null ? [next] : [])])
+  if (!allowed.has(selectedSegmentIndex.value) && compressSegmentOptions.value.length > 0) {
+    selectedSegmentIndex.value = compressSegmentOptions.value[compressSegmentOptions.value.length - 1].index
+  }
+}
+
+function clampMergeSegmentSelection() {
+  const available = availableMergeSegments.value.length
+  if (available === 0) {
+    mergeSegmentCount.value = 1
+    mergeSegmentEndIndex.value = 1
+    return
+  }
+  mergeSegmentCount.value = Math.min(
+    Math.max(1, mergeSegmentCount.value),
+    Math.min(4, available),
+  )
+  mergeSegmentEndIndex.value = Math.min(
+    Math.max(mergeSegmentCount.value, mergeSegmentEndIndex.value),
+    available,
+  )
+}
+
 async function buildUserPayload(
   type: PromptType,
-  options?: { compressExpected?: Record<string, unknown> },
+  options?: {
+    compressExpected?: Record<string, unknown>
+    model?: string
+  },
 ): Promise<Record<string, unknown>> {
   const conv = selectedConversation.value
   if (!conv) {
@@ -212,55 +330,63 @@ async function buildUserPayload(
     role_id: conv.role_id,
     app_name: conv.app_name,
   })
-  const range = validateRoundRange(
-    roundRange.value.start,
-    roundRange.value.end,
-    detail.messages.length,
-  )
-
   if (type === 'segment_compress') {
+    const range = getSegmentRoundRange(selectedSegmentIndex.value, detail.messages.length)
+    validateRoundRange(range.start, range.end, detail.messages.length)
+    let oldMemoryState: Record<string, unknown> = {}
+    const prevIndex = selectedSegmentIndex.value - 1
+    if (prevIndex >= 1) {
+      const prev = loadedCompressSegments.value.find((row) => row.segment_index === prevIndex)
+      if (prev) {
+        oldMemoryState = (prev.expected_result.memory_state as Record<string, unknown>) ?? {}
+      }
+    }
     return buildSegmentCompressPayload(
       detail.messages,
       conv,
       range.start,
       range.end,
+      oldMemoryState,
     )
   }
 
-  let compressExpected = options?.compressExpected
-  if (!compressExpected) {
-    try {
-      const saved = await getPromptTestResultByConversation({
-        user_id: conv.user_id,
-        role_id: conv.role_id,
-        app_name: conv.app_name,
-        prompt_type: 'segment_compress',
-      })
-      compressExpected = saved.expected_result
-    } catch {
-      throw new Error('History 合并需先对该会话运行 Segment 压缩测试')
-    }
+  const model = options?.model ?? selectedModelNames.value[0]
+  if (!model) {
+    throw new Error('请至少选择一个模型')
   }
+
+  await refreshLoadedCompressSegments()
+  const available = mergeableSegmentsFromRecords(loadedCompressSegments.value)
+  const segments = pickConsecutiveSegments(
+    available,
+    mergeSegmentCount.value,
+    mergeSegmentEndIndex.value,
+  )
 
   let oldHistoryMemory = ''
   try {
-    const savedMerge = await getPromptTestResultByConversation({
+    const savedMerges = await listRpMergeResults({
       user_id: conv.user_id,
       role_id: conv.role_id,
       app_name: conv.app_name,
-      prompt_type: 'history_merge',
+      prompt_version: version.value,
+      model,
+      run_group_id: rpHistoryDetail.value?.run_group_id,
     })
-    oldHistoryMemory = String(savedMerge.expected_result.history_memory ?? '')
+    const latest = savedMerges[savedMerges.length - 1]
+    oldHistoryMemory = String(latest?.expected_result.history_memory ?? '')
   } catch {
     oldHistoryMemory = ''
   }
 
-  return buildHistoryMergePayloadFromSingle(
-    compressExpected,
-    range.start,
-    range.end,
-    oldHistoryMemory,
-  )
+  return buildHistoryMergePayload(segments, oldHistoryMemory)
+}
+
+function buildMergeSegmentWindow(): { start: number; end: number } {
+  return {
+    start: mergeSegmentEndIndex.value - mergeSegmentCount.value + 1,
+    end: mergeSegmentEndIndex.value,
+  }
 }
 
 async function loadPromptParts(type: PromptType) {
@@ -309,28 +435,51 @@ function initialBatchRunGroupId(): number | undefined {
   return rpHistoryDetail.value.run_group_id
 }
 
-async function saveStepResult(
-  type: PromptType,
+async function saveCompressStep(
   parsed: Record<string, unknown>,
   requestConfig: ResolvedRuntimeRequest,
   runGroupId?: number,
-): Promise<PromptTestResultDetail | null> {
+  segmentIndex?: number,
+) {
   const conv = selectedConversation.value
   if (!conv) return null
-  return savePromptTestResult({
+  return saveRpCompressResult({
     user_id: conv.user_id,
     role_id: conv.role_id,
     app_name: conv.app_name,
     role_name: conv.role_name,
-    prompt_type: type,
-    expected_result: parsed,
-    round_start: roundRange.value.start,
-    round_end: roundRange.value.end,
     prompt_version: version.value,
+    segment_index: segmentIndex ?? selectedSegmentIndex.value,
+    expected_result: parsed,
     model: requestConfig.model,
     top_k: requestConfig.top_k ?? null,
     temperature: requestConfig.temperature,
-    ...(runGroupId != null ? { run_group_id: runGroupId } : {}),
+    ...(runGroupId != null ? { run_id: runGroupId } : {}),
+  })
+}
+
+async function saveMergeStep(
+  parsed: Record<string, unknown>,
+  requestConfig: ResolvedRuntimeRequest,
+  mergeSegmentStart: number,
+  mergeSegmentEnd: number,
+  runGroupId?: number,
+) {
+  const conv = selectedConversation.value
+  if (!conv) return null
+  return saveRpMergeResult({
+    user_id: conv.user_id,
+    role_id: conv.role_id,
+    app_name: conv.app_name,
+    role_name: conv.role_name,
+    prompt_version: version.value,
+    merge_segment_start: mergeSegmentStart,
+    merge_segment_end: mergeSegmentEnd,
+    expected_result: parsed,
+    model: requestConfig.model,
+    top_k: requestConfig.top_k ?? null,
+    temperature: requestConfig.temperature,
+    ...(runGroupId != null ? { run_id: runGroupId } : {}),
   })
 }
 
@@ -358,12 +507,6 @@ function rpHistoryOptionLabel(row: RpHistorySummary): string {
   ]
     .filter(Boolean)
     .join(' · ')
-}
-
-function compressForModel(model: string): Record<string, unknown> | undefined {
-  if (!selectedRpHistoryKey.value || !rpHistoryDetail.value) return undefined
-  const run = rpHistoryDetail.value.model_runs?.find((item) => item.model === model)
-  return run?.compress ?? undefined
 }
 
 function pickRunMetaForPromptType(
@@ -406,11 +549,15 @@ async function syncRpHistorySelection(key: string) {
     await applyRpHistoryContext(detail)
     applyHistoryModelSelection(detail)
     applyRunMeta(pickRunMetaForPromptType(detail, promptType.value))
-    await loadSystemPrompt()
+    await refreshLoadedCompressSegments()
   } catch (error) {
     rpHistoryDetail.value = null
     ElMessage.error(error instanceof Error ? error.message : '加载 RP 历史失败')
   }
+}
+
+function mergeSegmentOptionLabel(segment: MergeableSegment): string {
+  return `段 ${segment.index} · 第 ${segment.start_round}-${segment.end_round} 轮`
 }
 
 function applyHistoryModelSelection(detail: RpHistoryDetail) {
@@ -463,7 +610,6 @@ async function applyRpHistoryContext(detail: RpHistoryDetail) {
 
 interface ExecuteRunOptions {
   mode: PromptType
-  mergeCompressExpected?: Record<string, unknown>
 }
 
 async function executeRun(options: ExecuteRunOptions) {
@@ -491,11 +637,8 @@ async function executeRun(options: ExecuteRunOptions) {
   try {
     const type = mode
 
-    let systemText = systemPrompt.value
-    if (type === 'history_merge') {
-      const mergeParts = await loadPromptParts('history_merge')
-      systemText = mergeParts.system
-    }
+    const promptParts = await loadPromptParts(type)
+    const systemText = promptParts.system
     if (!systemText.trim()) {
       ElMessage.error('System Prompt 未加载')
       return
@@ -505,10 +648,7 @@ async function executeRun(options: ExecuteRunOptions) {
       models.map(async (model) => {
         let parsed: Record<string, unknown>
         try {
-          parsed = await buildUserPayload(type, {
-            compressExpected:
-              options.mergeCompressExpected ?? compressForModel(model),
-          })
+          parsed = await buildUserPayload(type, { model })
         } catch (error) {
           throw error instanceof Error ? error : new Error('构建测试输入失败')
         }
@@ -517,7 +657,9 @@ async function executeRun(options: ExecuteRunOptions) {
           throw new Error(`模型 ${model} 配置无效`)
         }
         const step = await executeTestStep(type, parsed, systemText, requestConfig)
-        return { model, step, requestConfig }
+        const mergeWindow =
+          type === 'history_merge' ? buildMergeSegmentWindow() : undefined
+        return { model, step, requestConfig, mergeWindow }
       }),
     )
 
@@ -537,14 +679,23 @@ async function executeRun(options: ExecuteRunOptions) {
         })
         continue
       }
-      const { step, requestConfig } = outcome.value
+      const { step, requestConfig, mergeWindow } = outcome.value
       bundles.push({ model, steps: [step] })
       if (step.response.status !== 200) continue
       successCount += 1
       const parsedResult = parseModelJson(step.rawContent)
       if (!parsedResult) continue
       try {
-        const saved = await saveStepResult(type, parsedResult, requestConfig, batchRunGroupId)
+        const saved =
+          type === 'segment_compress'
+            ? await saveCompressStep(parsedResult, requestConfig, batchRunGroupId)
+            : await saveMergeStep(
+                parsedResult,
+                requestConfig,
+                mergeWindow!.start,
+                mergeWindow!.end,
+                batchRunGroupId,
+              )
         if (saved?.run_group_id != null && batchRunGroupId == null) {
           batchRunGroupId = saved.run_group_id
         }
@@ -593,12 +744,23 @@ function segmentRangeKey(start: number, end: number): string {
   return `${start}-${end}`
 }
 
+interface PipelineCompressSaveItem {
+  segmentIndex: number
+  parsed: Record<string, unknown>
+}
+
+interface PipelineMergeSaveItem {
+  mergeSegmentStart: number
+  mergeSegmentEnd: number
+  parsed: Record<string, unknown>
+}
+
 interface PipelineModelOutcome {
   model: string
   steps: TestStepResult[]
   requestConfig: ResolvedRuntimeRequest
-  compressSave: Record<string, unknown>
-  mergeSave: Record<string, unknown>
+  compressSaves: PipelineCompressSaveItem[]
+  mergeSaves: PipelineMergeSaveItem[]
 }
 
 async function runPipelineForModel(
@@ -615,10 +777,10 @@ async function runPipelineForModel(
   }
 
   const segmentOutputs = new Map<string, HistorySegmentItem>()
-  const pipelineSnapshots: PipelineSegmentSnapshot[] = []
+  const compressSaves: PipelineCompressSaveItem[] = []
+  const mergeSaves: PipelineMergeSaveItem[] = []
   let memoryState: Record<string, unknown> = {}
   let historyMemory = ''
-  let nextSegmentId = 1
   const steps: TestStepResult[] = []
 
   for (const pipelineStep of plan.steps) {
@@ -658,18 +820,15 @@ async function runPipelineForModel(
       memoryState = nextMemoryState
 
       const item: HistorySegmentItem = {
-        id: nextSegmentId,
+        id: pipelineStep.segmentIndex,
         start_round: start,
         end_round: end,
         history_segment: historySegment,
       }
-      nextSegmentId += 1
       segmentOutputs.set(segmentRangeKey(start, end), item)
-      pipelineSnapshots.push({
-        start_round: start,
-        end_round: end,
-        history_segment: historySegment,
-        memory_state: nextMemoryState,
+      compressSaves.push({
+        segmentIndex: pipelineStep.segmentIndex,
+        parsed,
       })
       continue
     }
@@ -695,14 +854,19 @@ async function runPipelineForModel(
       throw new Error(`${step.stepLabel} 缺少 history_memory`)
     }
     historyMemory = String(parsed.history_memory)
+    mergeSaves.push({
+      mergeSegmentStart: mergeItems[0].id,
+      mergeSegmentEnd: mergeItems[mergeItems.length - 1].id,
+      parsed,
+    })
   }
 
   return {
     model,
     steps,
     requestConfig,
-    compressSave: buildPipelineCompressSaveResult(pipelineSnapshots),
-    mergeSave: { history_memory: historyMemory },
+    compressSaves,
+    mergeSaves,
   }
 }
 
@@ -789,27 +953,30 @@ async function executePipelineRun() {
       successCount += 1
 
       try {
-        const savedCompress = await saveStepResult(
-          'segment_compress',
-          result.compressSave,
-          result.requestConfig,
-          batchRunGroupId,
-        )
-        if (savedCompress?.run_group_id != null && batchRunGroupId == null) {
-          batchRunGroupId = savedCompress.run_group_id
+        for (const compressSave of result.compressSaves) {
+          const savedCompress = await saveCompressStep(
+            compressSave.parsed,
+            result.requestConfig,
+            batchRunGroupId,
+            compressSave.segmentIndex,
+          )
+          if (savedCompress?.run_group_id != null && batchRunGroupId == null) {
+            batchRunGroupId = savedCompress.run_group_id
+          }
         }
-        const savedMerge = await saveStepResult(
-          'history_merge',
-          result.mergeSave,
-          result.requestConfig,
-          batchRunGroupId ?? savedCompress?.run_group_id,
-        )
-        if (savedMerge?.run_group_id != null && batchRunGroupId == null) {
-          batchRunGroupId = savedMerge.run_group_id
+        for (const mergeSave of result.mergeSaves) {
+          const savedMerge = await saveMergeStep(
+            mergeSave.parsed,
+            result.requestConfig,
+            mergeSave.mergeSegmentStart,
+            mergeSave.mergeSegmentEnd,
+            batchRunGroupId,
+          )
+          if (savedMerge?.run_group_id != null && batchRunGroupId == null) {
+            batchRunGroupId = savedMerge.run_group_id
+          }
         }
-        if (savedCompress || savedMerge) {
-          savedCount += 1
-        }
+        savedCount += 1
       } catch {
         /* 单模型保存失败，继续其余模型 */
       }
@@ -862,23 +1029,23 @@ async function runTest() {
   }
 
   if (promptType.value === 'history_merge') {
-    const hasCompressFromHistory = Boolean(rpHistoryDetail.value?.compress)
-    if (!hasCompressFromHistory) {
-      try {
-        await getPromptTestResultByConversation({
-          user_id: selectedConversation.value!.user_id,
-          role_id: selectedConversation.value!.role_id,
-          app_name: selectedConversation.value!.app_name,
-          prompt_type: 'segment_compress',
-        })
-      } catch {
-        ElMessage.error(
-          selectedRpHistoryKey.value
-            ? '所选历史无 Compress，无法 Merge'
-            : '尚无 Compress 结果，请先运行 Segment 压缩',
-        )
-        return
-      }
+    await refreshLoadedCompressSegments()
+    if (availableMergeSegments.value.length === 0) {
+      ElMessage.error(
+        selectedRpHistoryKey.value
+          ? '所选历史无 Compress，无法 Merge'
+          : '尚无 Compress 结果，请先运行 Segment 压缩或链路测试',
+      )
+      return
+    }
+    clampMergeSegmentSelection()
+    if (mergeSegmentCount.value > availableMergeSegments.value.length) {
+      ElMessage.error('合并段数超过可用压缩段数量')
+      return
+    }
+    if (selectedMergeSegmentsPreview.value.length === 0) {
+      ElMessage.error('当前截至段与合并段数组合无效')
+      return
     }
   }
   pipelineForcedTailWarning.value = false
@@ -893,19 +1060,41 @@ async function loadRpHistoryOptions() {
   }
 }
 
-watch([version, promptType, lang, testMode], async () => {
-  await loadSystemPrompt()
-})
-
 watch(promptType, () => {
   stepResults.value = []
   if (!selectedRpHistoryKey.value || !rpHistoryDetail.value) return
   applyRunMeta(pickRunMetaForPromptType(rpHistoryDetail.value, promptType.value))
-  void loadSystemPrompt()
+  void refreshLoadedCompressSegments()
 })
 
 watch(selectedRpHistoryKey, (key) => {
   void syncRpHistorySelection(key)
+})
+
+watch(
+  [
+    testMode,
+    promptType,
+    version,
+    selectedConversationKey,
+    selectedRpHistoryKey,
+    () => selectedModelNames.value.join(','),
+    () => rpHistoryDetail.value?.run_group_id,
+    () => rpHistoryDetail.value?.model_runs?.length ?? 0,
+  ],
+  () => {
+    void refreshLoadedCompressSegments()
+  },
+)
+
+watch(availableMergeSegments, () => {
+  clampMergeSegmentSelection()
+})
+
+watch(mergeSegmentCount, () => {
+  if (mergeSegmentEndIndex.value < mergeSegmentCount.value) {
+    mergeSegmentEndIndex.value = mergeSegmentCount.value
+  }
 })
 
 onMounted(async () => {
@@ -918,16 +1107,8 @@ onMounted(async () => {
   if (!selectedRpHistoryKey.value) {
     resetToFirstModelSelection()
   }
-  await loadSystemPrompt()
+  await refreshLoadedCompressSegments()
 })
-
-async function loadSystemPrompt() {
-  const type =
-    testMode.value === 'pipeline' ? 'segment_compress' : promptType.value
-  const data = await getVersionPrompt(version.value, type, lang.value)
-  promptSfw.value = data.content_sfw
-  promptNsfw.value = data.content_nsfw
-}
 
 async function loadVersionOptions() {
   const data = await listVersions()
@@ -980,7 +1161,7 @@ async function loadVersionOptions() {
                 <el-radio-button label="single" value="single">单步测试</el-radio-button>
               </el-radio-group>
             </el-form-item>
-            <el-form-item label="测试轮次">
+            <el-form-item v-if="showRoundRangePicker" label="测试轮次">
               <div class="round-range-row">
                 <span class="round-label">第</span>
                 <el-input-number
@@ -1000,10 +1181,75 @@ async function loadVersionOptions() {
                 />
                 <span class="round-label">轮</span>
               </div>
-              <div v-if="testMode !== 'pipeline' && roundRangeHint" class="hint block-hint">
+              <div v-if="roundRangeHint" class="hint block-hint">
                 {{ roundRangeHint }}
               </div>
-              <div v-if="testMode === 'pipeline' && pipelinePlan" class="pipeline-preview">
+            </el-form-item>
+            <el-form-item v-if="showCompressSegmentPicker" label="压缩段">
+              <el-select
+                v-model="selectedSegmentIndex"
+                placeholder="选择压缩段"
+                style="width: 100%"
+                :disabled="compressSegmentOptions.length === 0"
+              >
+                <el-option
+                  v-for="option in compressSegmentOptions"
+                  :key="option.index"
+                  :label="option.label"
+                  :value="option.index"
+                />
+              </el-select>
+              <div class="hint block-hint">
+                轮次范围：{{ selectedCompressRoundLabel }}（按段累积，重跑同段将覆盖）
+              </div>
+            </el-form-item>
+            <template v-if="showMergeSegmentPicker">
+              <el-form-item label="合并段数">
+                <el-input-number
+                  v-model="mergeSegmentCount"
+                  :min="1"
+                  :max="maxMergeSegmentCount || 1"
+                  :disabled="availableMergeSegments.length === 0"
+                  controls-position="right"
+                />
+                <span class="hint">可选 1-4 段，上限为可用压缩段数</span>
+              </el-form-item>
+              <el-form-item label="截至段">
+                <el-select
+                  v-model="mergeSegmentEndIndex"
+                  placeholder="选择截至段"
+                  style="width: 100%"
+                  :disabled="availableMergeSegments.length === 0"
+                >
+                  <el-option
+                    v-for="segment in mergeSegmentEndOptions"
+                    :key="segment.index"
+                    :label="mergeSegmentOptionLabel(segment)"
+                    :value="segment.index"
+                    :disabled="segment.index < mergeSegmentCount"
+                  />
+                </el-select>
+                <div v-if="availableMergeSegments.length === 0" class="hint block-hint">
+                  请先运行 Segment 压缩或链路测试，或选择含 Compress 的历史记录
+                </div>
+              </el-form-item>
+              <el-form-item v-if="selectedMergeSegmentsPreview.length > 0" label="合并预览">
+                <ul class="pipeline-step-list merge-segment-preview">
+                  <li
+                    v-for="segment in selectedMergeSegmentsPreview"
+                    :key="`${segment.id}-${segment.start_round}-${segment.end_round}`"
+                  >
+                    段 {{ segment.id }} · 第 {{ segment.start_round }}-{{ segment.end_round }} 轮
+                  </li>
+                </ul>
+              </el-form-item>
+            </template>
+            <el-form-item
+              v-if="testMode === 'pipeline' && pipelinePlan"
+              label="执行计划"
+              class="pipeline-form-item"
+            >
+              <div class="pipeline-preview">
                 <div class="pipeline-preview-summary">{{ pipelinePreviewSummary }}</div>
                 <ul v-if="pipelineCycleLines.length > 0" class="pipeline-step-list">
                   <li v-for="(line, lineIndex) in pipelineCycleLines" :key="`${line}-${lineIndex}`">
@@ -1080,16 +1326,6 @@ async function loadVersionOptions() {
               </el-button>
             </el-form-item>
             </el-form>
-
-            <div class="prompt-preview">
-              <div class="preview-header">
-                <span>System Prompt 预览</span>
-                <span class="preview-meta">{{ systemPrompt.length }} 字符</span>
-              </div>
-              <el-scrollbar class="preview-scroll">
-                <pre class="prompt-pre preview-text">{{ systemPrompt }}</pre>
-              </el-scrollbar>
-            </div>
           </div>
         </el-card>
       </el-col>
@@ -1107,7 +1343,7 @@ async function loadVersionOptions() {
             type="warning"
             :closable="false"
             show-icon
-            title="40 轮后尾批不足 4 段，已按测试策略强制合并"
+            title="尾批不足 4 段，已按测试策略强制合并"
           />
           <template v-if="modelRunBundles.length > 0">
             <div
@@ -1243,7 +1479,15 @@ async function loadVersionOptions() {
   flex-direction: column;
 }
 
-.input-card :deep(.el-card__body),
+.input-card :deep(.el-card__body) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
 .result-card :deep(.el-card__body) {
   flex: 1;
   min-height: 0;
@@ -1258,10 +1502,16 @@ async function loadVersionOptions() {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  overflow: visible;
 }
 
 .input-form {
   flex-shrink: 0;
+}
+
+.input-form :deep(.el-form-item__content) {
+  overflow: visible;
+  line-height: 1.5;
 }
 
 .panel-header {
@@ -1288,28 +1538,48 @@ async function loadVersionOptions() {
   margin-top: 6px;
 }
 
+.pipeline-form-item :deep(.el-form-item__content) {
+  width: 100%;
+  min-width: 0;
+}
+
 .pipeline-preview {
-  margin-top: 8px;
-  padding: 8px 10px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
   background: #f5f7fa;
   border-radius: 6px;
+  overflow: visible;
 }
 
 .pipeline-preview-summary {
-  font-size: 12px;
+  font-size: 13px;
+  line-height: 1.5;
   color: #606266;
   font-weight: 500;
 }
 
 .pipeline-step-list {
-  margin: 6px 0 0;
-  padding-left: 18px;
-  font-size: 12px;
+  margin: 8px 0 0;
+  padding: 0 0 0 18px;
+  font-size: 13px;
+  line-height: 1.6;
   color: #909399;
+  list-style: disc;
+  list-style-position: outside;
+}
+
+.pipeline-step-list li {
+  word-break: break-word;
+  white-space: normal;
 }
 
 .pipeline-step-list li + li {
-  margin-top: 4px;
+  margin-top: 6px;
+}
+
+.merge-segment-preview {
+  margin-top: 0;
 }
 
 .pipeline-warning {
@@ -1391,53 +1661,6 @@ async function loadVersionOptions() {
   margin: 0;
   white-space: nowrap;
   flex-shrink: 0;
-}
-
-.prompt-preview {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  border: 1px solid #ebeef5;
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.preview-header {
-  flex-shrink: 0;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 8px 12px;
-  background: #fafafa;
-  border-bottom: 1px solid #ebeef5;
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.preview-meta {
-  font-size: 12px;
-  font-weight: 400;
-  color: #909399;
-}
-
-.preview-scroll {
-  flex: 1;
-  min-height: 0;
-}
-
-.preview-scroll :deep(.el-scrollbar) {
-  height: 100%;
-}
-
-.preview-scroll :deep(.el-scrollbar__wrap) {
-  overflow-x: hidden;
-}
-
-.preview-text {
-  margin: 0;
-  padding: 12px;
-  background: #fff;
 }
 
 .result-card {

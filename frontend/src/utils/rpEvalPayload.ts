@@ -10,7 +10,19 @@ export interface BuildRpEvalPayloadInput {
 
 function slimCompressOutput(
   raw: Record<string, unknown> | null,
+  segments?: RpHistoryModelRun['compress_segments'],
 ): Record<string, unknown> | null {
+  if (segments && segments.length > 0) {
+    return {
+      segments: segments.map((segment) => ({
+        segment_index: segment.segment_index,
+        round_start: segment.round_start,
+        round_end: segment.round_end,
+        history_segment: segment.expected_result.history_segment,
+        memory_state: segment.expected_result.memory_state,
+      })),
+    }
+  }
   if (!raw) return null
   const slim: Record<string, unknown> = {}
   if ('history_segment' in raw) slim.history_segment = raw.history_segment
@@ -56,7 +68,7 @@ export function buildRpEvalUserContent(input: BuildRpEvalPayloadInput): string {
     const payload = {
       meta,
       source_dialogue: sourceDialogue,
-      segment_compress: slimCompressOutput(run?.compress ?? null),
+      segment_compress: slimCompressOutput(run?.compress ?? null, run?.compress_segments),
       history_merge: slimMergeOutput(run?.merge ?? null),
       run_meta: {
         model: run?.model ?? '',
@@ -75,7 +87,7 @@ export function buildRpEvalUserContent(input: BuildRpEvalPayloadInput): string {
     comparison_mode: true,
     model_outputs: modelRuns.map((run) => ({
       model: run.model,
-      segment_compress: slimCompressOutput(run.compress),
+      segment_compress: slimCompressOutput(run.compress, run.compress_segments),
       history_merge: slimMergeOutput(run.merge),
       run_meta: {
         compress: formatRunMeta(run.compress_run),

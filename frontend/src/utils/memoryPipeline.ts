@@ -1,6 +1,28 @@
-export const SEGMENT_SIZE = 10
-export const PER_SEGMENT_MERGE_MAX_ROUND = 40
+export const FIRST_SEGMENT_ROUNDS = 10
 export const BATCH_MERGE_SIZE = 4
+
+/** 滑动段：第 1 段 1-10；第 n≥2 段为 10*(n-1)+1 ～ 10*n+1 */
+export function segmentRangeForIndex(segmentIndex: number): SegmentRange {
+  if (segmentIndex < 1) {
+    throw new Error('segment_index must be >= 1')
+  }
+  if (segmentIndex === 1) {
+    return { start: 1, end: 10 }
+  }
+  return {
+    start: 10 * (segmentIndex - 1) + 1,
+    end: 10 * segmentIndex + 1,
+  }
+}
+
+export function maxSegmentIndexForRounds(messageCount: number): number {
+  if (messageCount < 1) return 0
+  let index = 1
+  while (segmentRangeForIndex(index).start <= messageCount) {
+    index += 1
+  }
+  return Math.max(index - 1, 0)
+}
 
 export interface SegmentRange {
   start: number
@@ -40,23 +62,25 @@ export interface PipelinePlan {
   hasForcedTailMerge: boolean
 }
 
-/** 按全局 10 轮网格切分，与用户选定范围取交集 */
+/** 按滑动段公式切分，与用户选定范围取交集 */
 export function splitGlobalSegments(rangeStart: number, rangeEnd: number): SegmentRange[] {
   const start = Math.floor(rangeStart)
   const end = Math.floor(rangeEnd)
   if (start > end) return []
 
   const segments: SegmentRange[] = []
-  let gridStart = Math.floor((start - 1) / SEGMENT_SIZE) * SEGMENT_SIZE + 1
-
-  while (gridStart <= end) {
-    const gridEnd = gridStart + SEGMENT_SIZE - 1
-    const segStart = Math.max(gridStart, start)
-    const segEnd = Math.min(gridEnd, end)
-    if (segStart <= segEnd) {
-      segments.push({ start: segStart, end: segEnd })
+  let index = 1
+  while (true) {
+    const full = segmentRangeForIndex(index)
+    if (full.start > end) break
+    if (full.end >= start) {
+      const segStart = full.start
+      const segEnd = Math.min(full.end, end)
+      if (segStart <= segEnd) {
+        segments.push({ start: segStart, end: segEnd })
+      }
     }
-    gridStart += SEGMENT_SIZE
+    index += 1
   }
 
   return segments
@@ -87,8 +111,8 @@ function pushMergeStep(
 }
 
 /**
- * 模拟运行时合并策略，生成 compress / merge 步骤序列。
- * 40 轮后攒满 4 段批量合并；末尾不足 4 段时追加 forced_tail 合并。
+ * 链路测试合并策略：始终每攒满 4 段批量合并；末尾不足 4 段时 forced_tail。
+ * 单段合并仅用于单步测试，不在链路测试中生成。
  */
 export function planMemoryPipeline(rangeStart: number, rangeEnd: number): PipelinePlan {
   const segments = splitGlobalSegments(rangeStart, rangeEnd)
@@ -102,11 +126,6 @@ export function planMemoryPipeline(rangeStart: number, rangeEnd: number): Pipeli
       segment: { ...segment },
       segmentIndex: index + 1,
     })
-
-    if (segment.end <= PER_SEGMENT_MERGE_MAX_ROUND) {
-      pushMergeStep(steps, [segment], 'single')
-      return
-    }
 
     pendingBatch.push({ ...segment })
     if (pendingBatch.length >= BATCH_MERGE_SIZE) {
@@ -172,22 +191,6 @@ export function formatPipelineCycleLines(plan: PipelinePlan): string[] {
       continue
     }
 
-    const next = plan.steps[index + 1]
-    const { start, end } = step.segment
-    const roundLabel = roundRangeText(start, end)
-
-    if (
-      next?.type === 'merge' &&
-      next.mergeMode === 'single' &&
-      next.segments.length === 1 &&
-      next.segments[0].start === start &&
-      next.segments[0].end === end
-    ) {
-      lines.push(`${roundLabel}：Segment 压缩后单段合并`)
-      index += 2
-      continue
-    }
-
     const compressSteps: PipelineCompressStep[] = [step]
     let cursor = index + 1
     while (cursor < plan.steps.length && plan.steps[cursor].type === 'compress') {
@@ -211,7 +214,7 @@ export function formatPipelineCycleLines(plan: PipelinePlan): string[] {
       continue
     }
 
-    lines.push(`${roundLabel}：Segment 压缩`)
+    lines.push(`${roundRangeText(step.segment.start, step.segment.end)}：Segment 压缩`)
     index += 1
   }
 

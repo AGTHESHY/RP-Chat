@@ -1,5 +1,6 @@
-import type { ChatQaCase, PromptType } from '../api'
+import type { ChatQaCase, PromptType, RpCompressSegmentDetail } from '../api'
 import type { HistorySegmentItem } from './memoryPipeline'
+import { segmentRangeForIndex } from './memoryPipeline'
 
 export interface SelectedConversation {
   conversation_key: string
@@ -16,7 +17,30 @@ export interface PipelineSegmentSnapshot {
   memory_state: Record<string, unknown>
 }
 
-const DEFAULT_SEGMENT_ROUNDS = 10
+export interface MergeableSegment {
+  index: number
+  start_round: number
+  end_round: number
+  history_segment: string
+}
+
+export interface CompressResultMeta {
+  round_start: number
+  round_end: number
+}
+
+export { segmentRangeForIndex } from './memoryPipeline'
+
+export function maxNextSegmentIndex(
+  existingIndexes: number[],
+  messageCount: number,
+): number | null {
+  const maxExisting = existingIndexes.length > 0 ? Math.max(...existingIndexes) : 0
+  const next = maxExisting + 1
+  const range = segmentRangeForIndex(next)
+  if (range.start > messageCount) return null
+  return next
+}
 
 function formatUserLine(question: string): string {
   const text = question.trim()
@@ -38,9 +62,15 @@ export function formatConversationRounds(
     .join('\n\n')
 }
 
-export function getSegmentRoundRange(messageCount: number): { start: number; end: number } {
-  const end = Math.min(DEFAULT_SEGMENT_ROUNDS, messageCount)
-  return { start: 1, end: Math.max(end, 1) }
+export function getSegmentRoundRange(
+  segmentIndex: number,
+  messageCount: number,
+): { start: number; end: number } {
+  const range = segmentRangeForIndex(segmentIndex)
+  return {
+    start: range.start,
+    end: Math.min(range.end, messageCount),
+  }
 }
 
 export function validateRoundRange(
@@ -72,7 +102,7 @@ export function buildSegmentCompressPayload(
   roundEnd?: number,
   oldMemoryState: Record<string, unknown> = {},
 ) {
-  const end = roundEnd ?? getSegmentRoundRange(messages.length).end
+  const end = roundEnd ?? getSegmentRoundRange(1, messages.length).end
   const { start, end: validEnd } = validateRoundRange(roundStart, end, messages.length)
   const slice = messages.slice(start - 1, validEnd)
 
@@ -124,48 +154,105 @@ export function buildHistoryMergePayload(
   }
 }
 
-/** 单段合并的便捷封装，兼容单步测试 */
-export function buildHistoryMergePayloadFromSingle(
-  compressExpected: Record<string, unknown>,
-  roundStart: number,
-  roundEnd: number,
-  oldHistoryMemory = '',
-) {
-  const historySegment = String(compressExpected.history_segment ?? '').trim()
+export function mergeableSegmentsFromRecords(
+  records: RpCompressSegmentDetail[],
+): MergeableSegment[] {
+  return [...records]
+    .sort((a, b) => a.segment_index - b.segment_index)
+    .map((row) => {
+      const historySegment = String(row.expected_result.history_segment ?? '').trim()
+      if (!historySegment) {
+        throw new Error(`段 ${row.segment_index} 缺少 history_segment`)
+      }
+      return {
+        index: row.segment_index,
+        start_round: row.round_start,
+        end_round: row.round_end,
+        history_segment: historySegment,
+      }
+    })
+}
+
+export function extractMergeableSegments(
+  compress: Record<string, unknown>,
+  fallback?: CompressResultMeta,
+): MergeableSegment[] {
+  const pipelineSegments = compress.pipeline_segments
+  if (Array.isArray(pipelineSegments) && pipelineSegments.length > 0) {
+    return pipelineSegments.map((item, index) => {
+      const row = item as Record<string, unknown>
+      const historySegment = String(row.history_segment ?? '').trim()
+      if (!historySegment) {
+        throw new Error(`pipeline_segments 第 ${index + 1} 段缺少 history_segment`)
+      }
+      const startRound = Number(row.start_round)
+      const endRound = Number(row.end_round)
+      if (!Number.isFinite(startRound) || !Number.isFinite(endRound) || startRound < 1 || endRound < startRound) {
+        throw new Error(`pipeline_segments 第 ${index + 1} 段轮次无效`)
+      }
+      return {
+        index: index + 1,
+        start_round: startRound,
+        end_round: endRound,
+        history_segment: historySegment,
+      }
+    })
+  }
+
+  const historySegment = String(compress.history_segment ?? '').trim()
   if (!historySegment) {
     throw new Error('Segment 压缩期望结果缺少 history_segment')
   }
-
-  return buildHistoryMergePayload(
-    [
-      {
-        id: 1,
-        start_round: roundStart,
-        end_round: roundEnd,
-        history_segment: historySegment,
-      },
-    ],
-    oldHistoryMemory,
-  )
-}
-
-export function buildPipelineCompressSaveResult(
-  segments: PipelineSegmentSnapshot[],
-): Record<string, unknown> {
-  if (segments.length === 0) {
-    throw new Error('管线压缩结果为空')
+  if (!fallback) {
+    throw new Error('单段压缩结果缺少轮次元数据')
   }
 
-  const last = segments[segments.length - 1]
+  return [
+    {
+      index: 1,
+      start_round: fallback.round_start,
+      end_round: fallback.round_end,
+      history_segment: historySegment,
+    },
+  ]
+}
+
+export function pickConsecutiveSegments(
+  segments: MergeableSegment[],
+  count: number,
+  endIndex: number,
+): HistorySegmentItem[] {
+  if (segments.length === 0) {
+    throw new Error('没有可用的压缩段')
+  }
+  if (!Number.isInteger(count) || count < 1 || count > 4) {
+    throw new Error('合并段数须在 1-4 之间')
+  }
+  if (!Number.isInteger(endIndex) || endIndex < 1 || endIndex > segments.length) {
+    throw new Error(`截至段须在 1-${segments.length} 之间`)
+  }
+  if (endIndex - count + 1 < 1) {
+    throw new Error(`截至第 ${endIndex} 段时，最多只能向前连续合并 ${endIndex} 段`)
+  }
+
+  const startIndex = endIndex - count
+  return segments.slice(startIndex, endIndex).map((segment, offset) => ({
+    id: startIndex + offset + 1,
+    start_round: segment.start_round,
+    end_round: segment.end_round,
+    history_segment: segment.history_segment,
+  }))
+}
+
+export function mergeRoundRangeFromSegments(
+  segments: Array<Pick<HistorySegmentItem, 'start_round' | 'end_round'>>,
+): { start: number; end: number } {
+  if (segments.length === 0) {
+    throw new Error('合并段为空')
+  }
   return {
-    history_segment: last.history_segment,
-    memory_state: last.memory_state,
-    pipeline_segments: segments.map((segment) => ({
-      start_round: segment.start_round,
-      end_round: segment.end_round,
-      history_segment: segment.history_segment,
-      memory_state: segment.memory_state,
-    })),
+    start: Math.min(...segments.map((segment) => segment.start_round)),
+    end: Math.max(...segments.map((segment) => segment.end_round)),
   }
 }
 

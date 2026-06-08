@@ -20,9 +20,9 @@ from migrate_schema import (
     migrate_jailbreak_schema,
     migrate_prompt_drop_filename,
     migrate_prompt_sfw_nsfw,
-    migrate_prompt_test_result_schema,
     migrate_prompt_whitespace,
     migrate_rp_eval_schema,
+    migrate_rp_test_schema,
     migrate_version_schema,
 )
 from brain_service import (
@@ -46,16 +46,17 @@ from rp_eval_service import (
     list_rp_evaluations,
 )
 from seed_bootstrap import bootstrap_seed_data
-from prompt_test_result_service import (
-    PromptTestResultSaveRequest,
+from rp_test_result_service import (
+    RpCompressSaveRequest,
+    RpMergeSaveRequest,
     delete_rp_history,
     delete_rp_history_models,
-    get_prompt_test_result,
-    get_prompt_test_result_for_conversation,
     get_rp_history_detail,
-    list_prompt_test_results,
+    list_compress_segments,
+    list_merge_results,
     list_rp_history,
-    save_prompt_test_result,
+    save_compress,
+    save_merge,
 )
 from chat_qa_service import (
     get_chat_qa_case,
@@ -114,7 +115,7 @@ async def lifespan(app: FastAPI):
         migrate_version_schema(db)
         migrate_jailbreak_schema(db)
         migrate_chat_qa_schema(db)
-        migrate_prompt_test_result_schema(db)
+        migrate_rp_test_schema(db)
         migrate_rp_eval_schema(db)
     finally:
         db.close()
@@ -578,55 +579,62 @@ def api_delete_rp_history_models(
     )
 
 
-@app.get("/api/prompt-test-results")
-def api_list_prompt_test_results(
-    user_id: Optional[str] = Query(default=None),
-    role_id: Optional[str] = Query(default=None),
-    role_name: Optional[str] = Query(default=None),
-    prompt_type: Optional[str] = Query(default=None),
-    db: Session = Depends(get_db),
-) -> list[dict[str, Any]]:
-    return list_prompt_test_results(
-        db,
-        user_id=user_id,
-        role_id=role_id,
-        role_name=role_name,
-        prompt_type=prompt_type,
-    )
-
-
-@app.get("/api/prompt-test-results/by-conversation")
-def api_get_prompt_test_result_by_conversation(
+@app.get("/api/rp-compress-results")
+def api_list_rp_compress_results(
     user_id: str = Query(...),
     role_id: str = Query(...),
     app_name: str = Query(default=""),
-    prompt_type: str = Query(...),
+    prompt_version: Optional[str] = Query(default=None),
     model: Optional[str] = Query(default=None),
     run_group_id: Optional[int] = Query(default=None),
     db: Session = Depends(get_db),
-) -> dict[str, Any]:
-    return get_prompt_test_result_for_conversation(
+) -> list[dict[str, Any]]:
+    return list_compress_segments(
         db,
         user_id=user_id,
         role_id=role_id,
         app_name=app_name,
-        prompt_type=prompt_type,
+        prompt_version=prompt_version,
         model=model,
-        run_group_id=run_group_id,
+        run_id=run_group_id,
     )
 
 
-@app.get("/api/prompt-test-results/{record_id}")
-def api_get_prompt_test_result(record_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
-    return get_prompt_test_result(db, record_id)
-
-
-@app.post("/api/prompt-test-results")
-def api_save_prompt_test_result(
-    body: PromptTestResultSaveRequest,
+@app.post("/api/rp-compress-results")
+def api_save_rp_compress_result(
+    body: RpCompressSaveRequest,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    return save_prompt_test_result(db, body)
+    return save_compress(db, body)
+
+
+@app.get("/api/rp-merge-results")
+def api_list_rp_merge_results(
+    user_id: str = Query(...),
+    role_id: str = Query(...),
+    app_name: str = Query(default=""),
+    prompt_version: Optional[str] = Query(default=None),
+    model: Optional[str] = Query(default=None),
+    run_group_id: Optional[int] = Query(default=None),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    return list_merge_results(
+        db,
+        user_id=user_id,
+        role_id=role_id,
+        app_name=app_name,
+        prompt_version=prompt_version,
+        model=model,
+        run_id=run_group_id,
+    )
+
+
+@app.post("/api/rp-merge-results")
+def api_save_rp_merge_result(
+    body: RpMergeSaveRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return save_merge(db, body)
 
 
 @app.get("/api/rp-evaluations")

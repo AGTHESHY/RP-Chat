@@ -475,3 +475,97 @@ def migrate_brain_schema(db: Session) -> None:
                     """
                 )
             )
+
+
+def migrate_rp_test_schema(db: Session) -> None:
+    """Create segment-based RP test tables and drop legacy prompt_test_results."""
+    inspector = inspect(engine)
+    tables = inspector.get_table_names()
+
+    if "rp_test_runs" not in tables:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE rp_test_runs (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        user_id VARCHAR(32) NOT NULL,
+                        role_id VARCHAR(32) NOT NULL,
+                        app_name VARCHAR(128) NOT NULL DEFAULT '',
+                        role_name VARCHAR(128) NOT NULL DEFAULT '',
+                        prompt_version VARCHAR(64) NOT NULL DEFAULT '',
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        INDEX idx_rp_test_run_user (user_id),
+                        INDEX idx_rp_test_run_role (role_id),
+                        UNIQUE KEY uk_rp_test_run_conv_sp (user_id, role_id, app_name, prompt_version)
+                    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+                    """
+                )
+            )
+
+    if "rp_compress_results" not in tables:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE rp_compress_results (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        run_id INT NOT NULL,
+                        user_id VARCHAR(32) NOT NULL,
+                        role_id VARCHAR(32) NOT NULL,
+                        app_name VARCHAR(128) NOT NULL DEFAULT '',
+                        prompt_version VARCHAR(64) NOT NULL DEFAULT '',
+                        segment_index INT NOT NULL DEFAULT 1,
+                        round_start INT NOT NULL DEFAULT 1,
+                        round_end INT NOT NULL DEFAULT 10,
+                        model VARCHAR(128) NOT NULL DEFAULT '',
+                        expected_result LONGTEXT NOT NULL,
+                        top_k INT NULL,
+                        temperature DOUBLE NOT NULL DEFAULT 0,
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        INDEX idx_rp_compress_run (run_id),
+                        UNIQUE KEY uk_rp_compress_segment (
+                            user_id, role_id, app_name, prompt_version, model, segment_index
+                        )
+                    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+                    """
+                )
+            )
+
+    if "rp_merge_results" not in tables:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE rp_merge_results (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        run_id INT NOT NULL,
+                        user_id VARCHAR(32) NOT NULL,
+                        role_id VARCHAR(32) NOT NULL,
+                        app_name VARCHAR(128) NOT NULL DEFAULT '',
+                        prompt_version VARCHAR(64) NOT NULL DEFAULT '',
+                        merge_segment_start INT NOT NULL DEFAULT 1,
+                        merge_segment_end INT NOT NULL DEFAULT 1,
+                        round_start INT NOT NULL DEFAULT 1,
+                        round_end INT NOT NULL DEFAULT 10,
+                        model VARCHAR(128) NOT NULL DEFAULT '',
+                        expected_result LONGTEXT NOT NULL,
+                        top_k INT NULL,
+                        temperature DOUBLE NOT NULL DEFAULT 0,
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        INDEX idx_rp_merge_run (run_id),
+                        UNIQUE KEY uk_rp_merge_window (
+                            user_id, role_id, app_name, prompt_version, model,
+                            merge_segment_start, merge_segment_end
+                        )
+                    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+                    """
+                )
+            )
+
+    if "prompt_test_results" in tables:
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE prompt_test_results"))
