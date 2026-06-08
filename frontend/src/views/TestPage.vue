@@ -39,6 +39,7 @@ import {
   type SelectedConversation,
 } from '../utils/conversationPayload'
 import {
+  formatPipelineCycleLines,
   planMemoryPipeline,
   pipelinePlanSummary,
   pipelineStepLabel,
@@ -63,19 +64,6 @@ const testMode = ref<'pipeline' | 'single'>('pipeline')
 const promptType = ref<PromptType>('segment_compress')
 const lang = ref<PromptLang>('en')
 
-const NSFW_STORAGE_KEY = 'rp-chat-include-nsfw'
-
-function loadIncludeNsfw(): boolean {
-  try {
-    const raw = localStorage.getItem(NSFW_STORAGE_KEY)
-    if (raw === null) return true
-    return raw === 'true'
-  } catch {
-    return true
-  }
-}
-
-const includeNsfw = ref(loadIncludeNsfw())
 const promptSfw = ref('')
 const promptNsfw = ref('')
 
@@ -131,7 +119,7 @@ const rpHistoryTypeHint = computed(() => {
 })
 
 const systemPrompt = computed(() =>
-  composePrompt(promptSfw.value, promptNsfw.value, includeNsfw.value),
+  composePrompt(promptSfw.value, promptNsfw.value, false),
 )
 
 const roundRangeHint = computed(() => {
@@ -151,6 +139,11 @@ const pipelinePreviewSummary = computed(() => {
     return '当前轮次范围内没有可切分的 Segment'
   }
   return pipelinePlanSummary(pipelinePlan.value)
+})
+
+const pipelineCycleLines = computed(() => {
+  if (!pipelinePlan.value || pipelinePlan.value.segments.length === 0) return []
+  return formatPipelineCycleLines(pipelinePlan.value)
 })
 
 const selectedConversationMaxRounds = computed(() => {
@@ -203,10 +196,6 @@ watch(selectedConversationKey, (key) => {
   if (row) {
     applyConversation(row)
   }
-})
-
-watch(includeNsfw, (value) => {
-  localStorage.setItem(NSFW_STORAGE_KEY, String(value))
 })
 
 async function buildUserPayload(
@@ -279,7 +268,7 @@ async function loadPromptParts(type: PromptType) {
   return {
     sfw: data.content_sfw,
     nsfw: data.content_nsfw,
-    system: composePrompt(data.content_sfw, data.content_nsfw, includeNsfw.value),
+    system: composePrompt(data.content_sfw, data.content_nsfw, false),
   }
 }
 
@@ -1011,12 +1000,14 @@ async function loadVersionOptions() {
                 />
                 <span class="round-label">轮</span>
               </div>
-              <div v-if="roundRangeHint" class="hint block-hint">{{ roundRangeHint }}</div>
+              <div v-if="testMode !== 'pipeline' && roundRangeHint" class="hint block-hint">
+                {{ roundRangeHint }}
+              </div>
               <div v-if="testMode === 'pipeline' && pipelinePlan" class="pipeline-preview">
                 <div class="pipeline-preview-summary">{{ pipelinePreviewSummary }}</div>
-                <ul v-if="pipelinePlan.segments.length > 0" class="pipeline-step-list">
-                  <li v-for="step in pipelinePlan.steps" :key="pipelineStepLabel(step)">
-                    {{ pipelineStepLabel(step) }}
+                <ul v-if="pipelineCycleLines.length > 0" class="pipeline-step-list">
+                  <li v-for="(line, lineIndex) in pipelineCycleLines" :key="`${line}-${lineIndex}`">
+                    {{ line }}
                   </li>
                 </ul>
               </div>
@@ -1078,31 +1069,21 @@ async function loadVersionOptions() {
               <el-input-number v-model="runtime.top_k" :min="1" :max="100" :step="1" />
               <span class="hint">留空则不传</span>
             </el-form-item>
-            <el-form-item label="NSFW 段落" class="nsfw-row">
-              <div class="nsfw-row-content">
-                <div class="nsfw-controls">
-                  <el-switch
-                    v-model="includeNsfw"
-                    active-text="开启"
-                    inactive-text="关闭"
-                  />
-                  <span class="hint">关闭时最终 SP 不含 NSFW 规则，占位符会被移除</span>
-                </div>
-                <el-button
-                  type="primary"
-                  :loading="running"
-                  :disabled="!hasValidRuntime"
-                  @click="runTest"
-                >
-                  {{ testMode === 'pipeline' ? '运行链路测试' : '运行测试' }}
-                </el-button>
-              </div>
+            <el-form-item>
+              <el-button
+                type="primary"
+                :loading="running"
+                :disabled="!hasValidRuntime"
+                @click="runTest"
+              >
+                {{ testMode === 'pipeline' ? '运行链路测试' : '运行测试' }}
+              </el-button>
             </el-form-item>
             </el-form>
 
             <div class="prompt-preview">
               <div class="preview-header">
-                <span>System Prompt 预览（{{ includeNsfw ? 'SFW + NSFW' : '仅 SFW' }}）</span>
+                <span>System Prompt 预览</span>
                 <span class="preview-meta">{{ systemPrompt.length }} 字符</span>
               </div>
               <el-scrollbar class="preview-scroll">
@@ -1410,23 +1391,6 @@ async function loadVersionOptions() {
   margin: 0;
   white-space: nowrap;
   flex-shrink: 0;
-}
-
-.nsfw-row :deep(.el-form-item__content) {
-  flex: 1;
-}
-
-.nsfw-row-content {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  gap: 12px;
-}
-
-.nsfw-controls {
-  display: flex;
-  align-items: center;
 }
 
 .prompt-preview {

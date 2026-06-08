@@ -1,3 +1,4 @@
 dist/
 *.local
 server/.env
+node_modules/

@@ -155,3 +155,65 @@ export function pipelineStepLabel(step: PipelineStep): string {
   }
   return `History 合并 · 强制尾批 ${step.segments.length} 段 · ${label}`
 }
+
+function roundRangeText(start: number, end: number): string {
+  return start === end ? `第 ${start} 轮` : `第 ${start}-${end} 轮`
+}
+
+/** 将相邻的 compress + merge 合并为一句，用于管线预览 */
+export function formatPipelineCycleLines(plan: PipelinePlan): string[] {
+  const lines: string[] = []
+  let index = 0
+
+  while (index < plan.steps.length) {
+    const step = plan.steps[index]
+    if (step.type !== 'compress') {
+      index += 1
+      continue
+    }
+
+    const next = plan.steps[index + 1]
+    const { start, end } = step.segment
+    const roundLabel = roundRangeText(start, end)
+
+    if (
+      next?.type === 'merge' &&
+      next.mergeMode === 'single' &&
+      next.segments.length === 1 &&
+      next.segments[0].start === start &&
+      next.segments[0].end === end
+    ) {
+      lines.push(`${roundLabel}：Segment 压缩后单段合并`)
+      index += 2
+      continue
+    }
+
+    const compressSteps: PipelineCompressStep[] = [step]
+    let cursor = index + 1
+    while (cursor < plan.steps.length && plan.steps[cursor].type === 'compress') {
+      compressSteps.push(plan.steps[cursor] as PipelineCompressStep)
+      cursor += 1
+    }
+
+    const mergeStep = plan.steps[cursor]
+    if (mergeStep?.type === 'merge') {
+      const first = compressSteps[0].segment
+      const last = compressSteps[compressSteps.length - 1].segment
+      const batchRoundLabel = roundRangeText(first.start, last.end)
+      if (mergeStep.mergeMode === 'forced_tail') {
+        lines.push(
+          `${batchRoundLabel}：${compressSteps.length} 段 Segment 压缩后强制合并（尾批不足 4 段）`,
+        )
+      } else {
+        lines.push(`${batchRoundLabel}：${compressSteps.length} 段 Segment 压缩后批量合并`)
+      }
+      index = cursor + 1
+      continue
+    }
+
+    lines.push(`${roundLabel}：Segment 压缩`)
+    index += 1
+  }
+
+  return lines
+}
