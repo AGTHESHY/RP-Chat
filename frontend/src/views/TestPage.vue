@@ -35,7 +35,6 @@ import {
   getSegmentRoundRange,
   maxNextSegmentIndex,
   mergeableSegmentsFromRecords,
-  mergeRoundRangeFromSegments,
   parseModelJson,
   pickConsecutiveSegments,
   promptTypeLabel,
