@@ -379,6 +379,101 @@ function rpHistoryOptionLabel(row: RpHistorySummary): string {
     .join(' · ')
 }
 
+function pickRunMetaForPromptType(
+  detail: RpHistoryDetail,
+  type: PromptType,
+): RpHistoryRunMeta | null | undefined {
+  const runs = detail.model_runs ?? []
+  for (const run of runs) {
+    if (type === 'history_merge' && run.merge_run) return run.merge_run
+    if (type === 'segment_compress' && run.compress_run) return run.compress_run
+  }
+  return runs[0]?.compress_run ?? runs[0]?.merge_run
+}
+
+function applyRunMeta(run: RpHistoryRunMeta | null | undefined) {
+  if (!run) return
+  if (run.prompt_version && versionOptions.value.includes(run.prompt_version)) {
+    version.value = run.prompt_version
+  }
+  runtime.value.temperature = run.temperature
+  runtime.value.top_k = run.top_k
+}
+
+function applyHistoryModelSelection(detail: RpHistoryDetail) {
+  const historyModels = (detail.model_runs ?? [])
+    .map((run) => run.model.trim())
+    .filter(Boolean)
+
+  if (historyModels.length === 0) return
+
+  let bestProfileId = runtime.value.apiProfileId
+  let bestValid: string[] = []
+  for (const profile of registry.value.profiles) {
+    const valid = historyModels.filter((model) => profile.models.includes(model))
+    if (valid.length > bestValid.length) {
+      bestValid = valid
+      bestProfileId = profile.id
+    }
+  }
+
+  if (bestValid.length === 0) {
+    ElMessage.warning('该历史记录中的模型在当前 API 配置中均不可用')
+    return
+  }
+
+  runtime.value.apiProfileId = bestProfileId
+  setSelectedModels(bestValid)
+}
+
+async function applyRpHistoryContext(detail: RpHistoryDetail) {
+  const matched = conversationOptions.value.find(
+    (item) => item.conversation_key === detail.conversation_key,
+  )
+  if (matched) {
+    applyConversation(matched)
+  } else {
+    selectedConversationKey.value = detail.conversation_key
+    selectedConversation.value = {
+      conversation_key: detail.conversation_key,
+      user_id: detail.user_id,
+      role_id: detail.role_id,
+      app_name: detail.app_name,
+      role_name: detail.role_name,
+    }
+  }
+  roundRange.value = {
+    start: detail.round_start,
+    end: detail.round_end,
+  }
+}
+
+async function syncRpHistorySelection(key: string) {
+  if (!key) {
+    rpHistoryDetail.value = null
+    resetToFirstModelSelection()
+    return
+  }
+  const summary = selectedRpHistorySummary.value
+  if (!summary) return
+  try {
+    const detail = await getRpHistoryDetail({
+      user_id: summary.user_id,
+      role_id: summary.role_id,
+      app_name: summary.app_name,
+      run_group_id: summary.run_group_id,
+    })
+    rpHistoryDetail.value = detail
+    await applyRpHistoryContext(detail)
+    applyHistoryModelSelection(detail)
+    applyRunMeta(pickRunMetaForPromptType(detail, promptType.value))
+    await refreshSavedRecords()
+  } catch (error) {
+    rpHistoryDetail.value = null
+    ElMessage.error(error instanceof Error ? error.message : '加载 RP 历史失败')
+  }
+}
+
 function applyConversation(row: ChatQaConversationSummary) {
   selectedConversationKey.value = row.conversation_key
   selectedConversation.value = {
@@ -799,9 +894,9 @@ async function loadVersionOptions() {
                 <ul class="pipeline-step-list merge-segment-preview">
                   <li
                     v-for="segment in selectedMergeSegmentsPreview"
-                    :key="`${segment.index}-${segment.start_round}-${segment.end_round}`"
+                    :key="`${segment.id}-${segment.start_round}-${segment.end_round}`"
                   >
-                    段 {{ segment.index }} · 第 {{ segment.start_round }}-{{ segment.end_round }} 轮
+                    段 {{ segment.id }} · 第 {{ segment.start_round }}-{{ segment.end_round }} 轮
                   </li>
                 </ul>
               </el-form-item>
