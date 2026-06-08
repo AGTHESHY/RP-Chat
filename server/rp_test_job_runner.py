@@ -514,7 +514,6 @@ async def _run_job_loop(job_id: str) -> None:
                             )
                         else:
                             await _execute_merge_step(
-                                db=db,
                                 job=job,
                                 model=model,
                                 step=step,
